@@ -9,7 +9,8 @@ class DockerManager:
     def get_active_containers(self):
         try:
             containers_info = [{"id": container.id, "name": container.name, "status": container.status} for
-                               container in self.client.containers.list()]
+                               container in self.client.containers.list(filters={"status": "running"}) if
+                               "hummingbot" in container.name]
             return {"active_instances": containers_info}
         except DockerException as e:
             return str(e)
@@ -17,7 +18,8 @@ class DockerManager:
     def get_exited_containers(self):
         try:
             containers_info = [{"id": container.id, "name": container.name, "status": container.status} for
-                               container in self.client.containers.list(filters={"status": "exited"})]
+                               container in self.client.containers.list(filters={"status": "exited"}) if
+                               "hummingbot" in container.name]
             return {"exited_instances": containers_info}
         except DockerException as e:
             return str(e)
