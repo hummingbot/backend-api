@@ -1,0 +1,11 @@
+name: backend-api
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - fastapi
+  - python=3.11
+  - uvicorn
+  - pip
+  - pip:
+      - docker
