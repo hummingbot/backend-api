@@ -1,5 +1,9 @@
+import os
+
 import docker
 from docker.errors import DockerException
+
+from models import HummingbotInstanceConfig
 
 
 class DockerManager:
@@ -57,4 +61,38 @@ class DockerManager:
             container.remove(force=force)
             return {"success": True, "message": f"Container {container_name} removed successfully."}
         except DockerException as e:
+            return {"success": False, "message": str(e)}
+
+    def create_hummingbot_instance(self, config: HummingbotInstanceConfig):
+        bots_dir = "bots"  # Root directory for all bot-related files
+
+        instance_dir = os.path.join(bots_dir, 'instances', config.instance_name)
+        if not os.path.exists(instance_dir):
+            os.makedirs(instance_dir)
+            os.makedirs(os.path.join(instance_dir, 'data'))
+            os.makedirs(os.path.join(instance_dir, 'logs'))
+
+        # Set up Docker volumes
+        volumes = {
+            os.path.abspath(os.path.join(bots_dir, 'credentials', config.credentials_profile)): {'bind': '/home/hummingbot/credentials', 'mode': 'ro'},
+            os.path.abspath(instance_dir): {'bind': '/home/hummingbot/instance', 'mode': 'rw'},
+            # You can add more volumes for 'controllers' and 'scripts' if needed
+        }
+
+        # Set up environment variables
+
+        environment = {}
+        if config.autostart_script:
+            environment['CONFIG_FILE_NAME'] = config.autostart_script
+
+        try:
+            self.client.containers.run(
+                config.image,
+                name=config.instance_name,
+                volumes=volumes,
+                environment=environment,
+                detach=True
+            )
+            return {"success": True, "message": f"Instance {config.instance_name} created successfully."}
+        except docker.errors.DockerException as e:
             return {"success": False, "message": str(e)}
