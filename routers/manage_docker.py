@@ -1,10 +1,15 @@
-from fastapi import APIRouter
+import os
+
+from fastapi import APIRouter, HTTPException
 import logging
 from models import HummingbotInstanceConfig
 from services import DockerManager
+from utils.bot_archiver import BotArchiver
 
 router = APIRouter(tags=["Docker Management"])
 docker_manager = DockerManager()
+bot_archiver = BotArchiver(os.environ.get("AWS_API_KEY"), os.environ.get("AWS_SECRET_KEY"),
+                           os.environ.get("S3_DEFAULT_BUCKET_NAME"))
 
 
 @router.get("/is-docker-running")
@@ -28,9 +33,22 @@ async def clean_exited_containers():
 
 
 @router.post("/remove-container/{container_name}")
-async def remove_container(container_name: str):
-    return docker_manager.remove_container(container_name)
+async def remove_container(container_name: str, archive_locally: bool = True, s3_bucket: str = None):
+    # Form the instance directory path correctly
+    instance_dir = os.path.join('bots', 'instances', container_name)
 
+    try:
+        # Archive the data
+        if archive_locally:
+            bot_archiver.archive_locally(container_name, instance_dir)
+        else:
+            bot_archiver.archive_and_upload(container_name, instance_dir, bucket_name=s3_bucket)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    # Remove the container
+    response = docker_manager.remove_container(container_name)
+    return response
 
 @router.post("/stop-container/{container_name}")
 async def stop_container(container_name: str):
