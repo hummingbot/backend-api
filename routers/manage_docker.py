@@ -1,5 +1,7 @@
 from fastapi import APIRouter
-from utils.docker_manager import DockerManager
+import logging
+from models import HummingbotInstanceConfig
+from services import DockerManager
 
 router = APIRouter(tags=["Docker Management"])
 docker_manager = DockerManager()
@@ -34,6 +36,14 @@ async def remove_container(container_name: str):
 async def stop_container(container_name: str):
     return docker_manager.stop_container(container_name)
 
+
 @router.post("/start-container/{container_name}")
 async def start_container(container_name: str):
     return docker_manager.start_container(container_name)
+
+
+@router.post("/create-hummingbot-instance")
+async def create_hummingbot_instance(config: HummingbotInstanceConfig):
+    logging.info(f"Creating hummingbot instance with config: {config}")
+    response = docker_manager.create_hummingbot_instance(config)
+    return response
