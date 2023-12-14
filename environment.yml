@@ -9,3 +9,5 @@ dependencies:
   - pip
   - pip:
       - docker
+      - python-dotenv
+      - boto3
