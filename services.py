@@ -74,16 +74,23 @@ class DockerManager:
 
         # Set up Docker volumes
         volumes = {
-            os.path.abspath(os.path.join(bots_dir, 'credentials', config.credentials_profile)): {'bind': '/home/hummingbot/credentials', 'mode': 'ro'},
-            os.path.abspath(instance_dir): {'bind': '/home/hummingbot/instance', 'mode': 'rw'},
-            # You can add more volumes for 'controllers' and 'scripts' if needed
+            os.path.abspath(os.path.join(bots_dir, 'credentials', config.credentials_profile)): {'bind': '/home/hummingbot/conf', 'mode': 'ro'},
+            os.path.abspath(os.path.join(bots_dir, 'credentials', config.credentials_profile, 'connectors')): {'bind': '/home/hummingbot/conf/connectors', 'mode': 'ro'},
+            os.path.abspath(os.path.join(instance_dir, 'data')): {'bind': '/home/hummingbot/data', 'mode': 'rw'},
+            os.path.abspath(os.path.join(instance_dir, 'logs')): {'bind': '/home/hummingbot/logs', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_dir, 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_dir, 'controllers')): {'bind': '/home/hummingbot/smart_components/controllers', 'mode': 'rw'},
         }
 
         # Set up environment variables
-
         environment = {}
+        password = os.environ.get('CONFIG_PASSWORD', None)
         if config.autostart_script:
-            environment['CONFIG_FILE_NAME'] = config.autostart_script
+            if password:
+                environment["CONFIG_PASSWORD"] = password
+                environment['CONFIG_FILE_NAME'] = config.autostart_script
+            else:
+                return {"success": False, "message": "Password not provided. We cannot start the bot without a password."}
 
         try:
             self.client.containers.run(
@@ -91,7 +98,10 @@ class DockerManager:
                 name=config.instance_name,
                 volumes=volumes,
                 environment=environment,
-                detach=True
+                network_mode="host",
+                detach=True,
+                tty=True,
+                stdin_open=True,
             )
             return {"success": True, "message": f"Instance {config.instance_name} created successfully."}
         except docker.errors.DockerException as e:
