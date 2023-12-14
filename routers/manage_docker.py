@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from docker_manager import DockerManager
+from utils.docker_manager import DockerManager
 
 router = APIRouter(tags=["Docker Management"])
 docker_manager = DockerManager()
