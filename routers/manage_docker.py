@@ -33,3 +33,7 @@ async def remove_container(container_name: str):
 @router.post("/stop-container/{container_name}")
 async def stop_container(container_name: str):
     return docker_manager.stop_container(container_name)
+
+@router.post("/start-container/{container_name}")
+async def start_container(container_name: str):
+    return docker_manager.start_container(container_name)
