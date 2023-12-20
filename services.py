@@ -89,12 +89,13 @@ class DockerManager:
         # Set up environment variables
         environment = {}
         password = os.environ.get('CONFIG_PASSWORD', None)
-        if config.autostart_script:
-            if password:
-                environment["CONFIG_PASSWORD"] = password
+        if password:
+            environment["CONFIG_PASSWORD"] = password
+
+        if config.autostart_script and password:
                 environment['CONFIG_FILE_NAME'] = config.autostart_script
-            else:
-                return {"success": False, "message": "Password not provided. We cannot start the bot without a password."}
+        else:
+            return {"success": False, "message": "Password not provided. We cannot start the bot without a password."}
 
         try:
             self.client.containers.run(
