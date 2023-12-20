@@ -11,3 +11,5 @@ dependencies:
       - docker
       - python-dotenv
       - boto3
+      - python-multipart
+      - PyYAML
