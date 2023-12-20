@@ -7,4 +7,5 @@ class HummingbotInstanceConfig(BaseModel):
     instance_name: str
     credentials_profile: str
     image: str = "hummingbot/hummingbot:latest"
-    autostart_script: Optional[str] = None
+    script: Optional[str] = None
+    script_config: Optional[str] = None

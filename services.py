@@ -83,6 +83,7 @@ class DockerManager:
             os.path.abspath(os.path.join(instance_dir, 'data')): {'bind': '/home/hummingbot/data', 'mode': 'rw'},
             os.path.abspath(os.path.join(instance_dir, 'logs')): {'bind': '/home/hummingbot/logs', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_dir, 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_dir, 'scripts_configs')): {'bind': '/home/hummingbot/conf/scripts', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_dir, 'controllers')): {'bind': '/home/hummingbot/smart_components/controllers', 'mode': 'rw'},
         }
 
@@ -92,8 +93,10 @@ class DockerManager:
         if password:
             environment["CONFIG_PASSWORD"] = password
 
-        if config.autostart_script and password:
-                environment['CONFIG_FILE_NAME'] = config.autostart_script
+        if config.script and password:
+            environment['CONFIG_FILE_NAME'] = config.script
+            if config.script_config:
+                environment['SCRIPT_CONFIG'] = config.script_config
         else:
             return {"success": False, "message": "Password not provided. We cannot start the bot without a password."}
 
