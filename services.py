@@ -1,3 +1,4 @@
+import logging
 import os
 
 import docker
@@ -8,7 +9,10 @@ from models import HummingbotInstanceConfig
 
 class DockerManager:
     def __init__(self):
-        self.client = docker.from_env()
+        try:
+            self.client = docker.from_env()
+        except DockerException as e:
+            logging.error(f"It was not possible to connect to Docker. Please make sure Docker is running. Error: {e}")
 
     def get_active_containers(self):
         try:
