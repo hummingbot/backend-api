@@ -16,7 +16,7 @@ class BotsManager:
 
     def update_active_bots(self):
         active_containers = self.get_active_containers()
-        active_hbot_containers = [container for container in active_containers if "hummingbot-" in container]
+        active_hbot_containers = [container for container in active_containers if "hummingbot-" in container and "broker" not in container]
 
         # Remove bots that are no longer active
         for bot in list(self.active_bots):
