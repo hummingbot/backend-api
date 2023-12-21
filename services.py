@@ -1,10 +1,14 @@
 import logging
 import os
+import shutil
 
 import docker
+import yaml
 from docker.errors import DockerException
+from docker.types import LogConfig
 
 from models import HummingbotInstanceConfig
+from utils.file_system_utils import FileSystemUtil
 
 
 class DockerManager:
@@ -69,22 +73,36 @@ class DockerManager:
 
     def create_hummingbot_instance(self, config: HummingbotInstanceConfig):
         bots_dir = "bots"  # Root directory for all bot-related files
-
-        instance_dir = os.path.join(bots_dir, 'instances', config.instance_name)
+        instance_name = f"hummingbot-{config.instance_name}"
+        instance_dir = os.path.join(bots_dir, 'instances', instance_name)
         if not os.path.exists(instance_dir):
             os.makedirs(instance_dir)
             os.makedirs(os.path.join(instance_dir, 'data'))
             os.makedirs(os.path.join(instance_dir, 'logs'))
 
+        # Copy credentials to instance directory
+        source_credentials_dir = os.path.join(bots_dir, 'credentials', config.credentials_profile)
+        destination_credentials_dir = os.path.join(instance_dir, 'conf')
+
+        # Remove the destination directory if it already exists
+        if os.path.exists(destination_credentials_dir):
+            shutil.rmtree(destination_credentials_dir)
+
+        # Copy the entire contents of source_credentials_dir to destination_credentials_dir
+        shutil.copytree(source_credentials_dir, destination_credentials_dir)
+        conf_file_path = f"{instance_dir}/conf/conf_client.yml"
+        client_config = FileSystemUtil.read_yaml_file(conf_file_path)
+        client_config['instance_id'] = instance_name
+        FileSystemUtil.dump_dict_to_yaml(client_config, conf_file_path)
         # Set up Docker volumes
         volumes = {
-            os.path.abspath(os.path.join(bots_dir, 'credentials', config.credentials_profile)): {'bind': '/home/hummingbot/conf', 'mode': 'ro'},
-            os.path.abspath(os.path.join(bots_dir, 'credentials', config.credentials_profile, 'connectors')): {'bind': '/home/hummingbot/conf/connectors', 'mode': 'ro'},
+            os.path.abspath(os.path.join(instance_dir, 'conf')): {'bind': '/home/hummingbot/conf', 'mode': 'rw'},
+            os.path.abspath(os.path.join(instance_dir, 'conf', 'connectors')): {'bind': '/home/hummingbot/conf/connectors', 'mode': 'rw'},
             os.path.abspath(os.path.join(instance_dir, 'data')): {'bind': '/home/hummingbot/data', 'mode': 'rw'},
             os.path.abspath(os.path.join(instance_dir, 'logs')): {'bind': '/home/hummingbot/logs', 'mode': 'rw'},
-            os.path.abspath(os.path.join(bots_dir, 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'rw'},
-            os.path.abspath(os.path.join(bots_dir, 'scripts_configs')): {'bind': '/home/hummingbot/conf/scripts', 'mode': 'rw'},
-            os.path.abspath(os.path.join(bots_dir, 'controllers')): {'bind': '/home/hummingbot/smart_components/controllers', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_dir, 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'ro'},
+            os.path.abspath(os.path.join(bots_dir, 'scripts_configs')): {'bind': '/home/hummingbot/conf/scripts', 'mode': 'ro'},
+            os.path.abspath(os.path.join(bots_dir, 'controllers')): {'bind': '/home/hummingbot/smart_components/controllers', 'mode': 'ro'},
         }
 
         # Set up environment variables
@@ -93,24 +111,33 @@ class DockerManager:
         if password:
             environment["CONFIG_PASSWORD"] = password
 
-        if config.script and password:
-            environment['CONFIG_FILE_NAME'] = config.script
-            if config.script_config:
-                environment['SCRIPT_CONFIG'] = config.script_config
-        else:
-            return {"success": False, "message": "Password not provided. We cannot start the bot without a password."}
+        if config.script:
+            if password:
+                environment['CONFIG_FILE_NAME'] = config.script
+                if config.script_config:
+                    environment['SCRIPT_CONFIG'] = config.script_config
+            else:
+                return {"success": False,
+                        "message": "Password not provided. We cannot start the bot without a password."}
 
+        log_config = LogConfig(
+            type="json-file",
+            config={
+                'max-size': '10m',
+                'max-file': "5",
+            })
         try:
             self.client.containers.run(
-                config.image,
-                name=config.instance_name,
+                image=config.image,
+                name=instance_name,
                 volumes=volumes,
                 environment=environment,
                 network_mode="host",
                 detach=True,
                 tty=True,
                 stdin_open=True,
+                log_config=log_config,
             )
-            return {"success": True, "message": f"Instance {config.instance_name} created successfully."}
+            return {"success": True, "message": f"Instance {instance_name} created successfully."}
         except docker.errors.DockerException as e:
             return {"success": False, "message": str(e)}
