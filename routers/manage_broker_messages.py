@@ -1,10 +1,8 @@
-import asyncio
-import threading
-import time
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
-from fastapi import APIRouter, BackgroundTasks
+from fastapi import APIRouter
 
+from models import StartBotAction, StopBotAction, ImportStrategyAction
 from utils.bots_manager import BotsManager
 
 # Initialize the scheduler
@@ -33,4 +31,31 @@ async def shutdown_event():
     scheduler.shutdown()
 
 
+@router.post("/start-bot")
+def start_bot(action: StartBotAction):
+    response = bots_manager.start_bot(action.bot_name, log_level=action.log_level, script=action.script, conf=action.conf, async_backend=action.async_backend)
+    return {"status": "success", "response": response}
 
+
+@router.post("/stop-bot")
+def stop_bot(action: StopBotAction):
+    response = bots_manager.stop_bot(action.bot_name, skip_order_cancellation=action.skip_order_cancellation, async_backend=action.async_backend)
+    return {"status": "success", "response": response}
+
+
+@router.post("/import-strategy")
+def import_strategy(action: ImportStrategyAction):
+    response = bots_manager.import_strategy_for_bot(action.bot_name, action.strategy)
+    return {"status": "success", "response": response}
+
+
+@router.get("/get-bot-status/{bot_name}")
+def get_bot_status(bot_name: str):
+    response = bots_manager.get_bot_status(bot_name)
+    return {"status": "success", "response": response}
+
+
+@router.get("/get-bot-history/{bot_name}")
+def get_bot_history(bot_name: str):
+    response = bots_manager.get_bot_history(bot_name)
+    return {"status": "success", "response": response}
