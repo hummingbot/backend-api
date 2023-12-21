@@ -1,6 +1,8 @@
 import os
 from typing import List
 
+import yaml
+
 
 class FileSystemUtil:
     def __init__(self, base_path: str):
@@ -20,3 +22,14 @@ class FileSystemUtil:
             raise FileExistsError(f"File '{file_name}' already exists in '{directory}'.")
         with open(file_path, 'w') as file:
             file.write(content)
+
+    @staticmethod
+    def dump_dict_to_yaml(data_dict, filename):
+        with open(filename, 'w') as file:
+            yaml.dump(data_dict, file)
+
+    @staticmethod
+    def read_yaml_file(file_path):
+        with open(file_path, 'r') as file:
+            data = yaml.safe_load(file)
+        return data
