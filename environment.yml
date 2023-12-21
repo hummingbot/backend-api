@@ -11,3 +11,7 @@ dependencies:
       - docker
       - python-dotenv
       - boto3
+      - python-multipart
+      - PyYAML
+      - apscheduler
+      - git+https://github.com/hummingbot/hbot-remote-client-py.git

@@ -34,9 +34,10 @@ async def clean_exited_containers():
 
 @router.post("/remove-container/{container_name}")
 async def remove_container(container_name: str, archive_locally: bool = True, s3_bucket: str = None):
+    # Remove the container
+    response = docker_manager.remove_container(container_name)
     # Form the instance directory path correctly
     instance_dir = os.path.join('bots', 'instances', container_name)
-
     try:
         # Archive the data
         if archive_locally:
@@ -46,8 +47,6 @@ async def remove_container(container_name: str, archive_locally: bool = True, s3
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    # Remove the container
-    response = docker_manager.remove_container(container_name)
     return response
 
 @router.post("/stop-container/{container_name}")
