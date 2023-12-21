@@ -101,7 +101,7 @@ class DManV3MultiplePairs(ScriptStrategyBase):
         # we are going to close all the open positions when the bot stops
         for connector_name, connector in self.connectors.items():
             for trading_pair, position in connector.account_positions.items():
-                if trading_pair in self.markets[connector_name]:
+                if trading_pair in connector.trading_pairs:
                     if position.position_side == PositionSide.LONG:
                         self.sell(connector_name=connector_name,
                                   trading_pair=position.trading_pair,
