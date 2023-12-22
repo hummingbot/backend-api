@@ -1,5 +1,7 @@
 import os
 import shutil
+from datetime import datetime
+
 import boto3
 from botocore.exceptions import NoCredentialsError
 
@@ -20,8 +22,8 @@ class BotArchiver:
 
         if bucket_name is None:
             bucket_name = self.default_bucket_name
-
-        archive_name = f"{instance_name}_archive.tar.gz"
+        today = datetime.now().strftime("%Y-%m-%d")
+        archive_name = f"{instance_name}_archive_{today}.tar.gz"
         archive_path = os.path.join('bots', 'archived', archive_name)
         self.compress_directory(instance_dir, archive_path)
 
@@ -39,7 +41,8 @@ class BotArchiver:
         print(f"Compressed {source_dir} into {output_path}")
 
     def archive_locally(self, instance_name, instance_dir):
-        archive_name = f"{instance_name}_archive.tar.gz"
+        today = datetime.now().strftime("%Y-%m-%d")
+        archive_name = f"{instance_name}_archive_{today}.tar.gz"
         archive_path = os.path.join('bots', 'archived', archive_name)
         self.compress_directory(instance_dir, archive_path)
         shutil.rmtree(instance_dir)  # Remove the instance directory
