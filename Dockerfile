@@ -2,7 +2,7 @@
 FROM continuumio/miniconda3
 
 # Set the working directory in the container
-WORKDIR /usr/src/app
+WORKDIR /backend-api
 
 # Copy the current directory contents and the Conda environment file into the container
 COPY . .
