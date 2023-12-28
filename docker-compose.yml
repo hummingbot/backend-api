@@ -8,8 +8,8 @@ services:
     volumes:
       - ./bots:/backend-api/bots
       - /var/run/docker.sock:/var/run/docker.sock
-    environment:
-      - CONFIG_PASSWORD=a
+    env_file:
+      - .env
   emqx:
     container_name: hummingbot-broker
     image: emqx:5
