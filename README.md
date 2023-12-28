@@ -18,7 +18,7 @@ Backend-api is a dedicated solution for managing Hummingbot instances. It offers
    ```
 2. Activate the Conda environment:
    ```bash
-   conda activate [your-env-name]
+   conda activate backend-api
    ```
 
 ### Running the API with Conda
@@ -39,7 +39,7 @@ For running the project using Docker, follow these steps:
 2. **Build and Run with Docker Compose**:
    - After setting up the environment variables, use Docker Compose to build and run the project:
      ```bash
-     docker-compose up --build
+     docker compose up --build
      ```
 
    - This command will build the Docker image and start the containers as defined in your `docker-compose.yml` file.
