@@ -1,14 +1,20 @@
+import os
+
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from fastapi import APIRouter
 
 from models import StartBotAction, StopBotAction, ImportStrategyAction
 from utils.bots_manager import BotsManager
+broker_host = os.getenv('BROKER_HOST', 'localhost')
+broker_port = int(os.getenv('BROKER_PORT', 1883))
+broker_username = os.getenv('BROKER_USERNAME', 'admin')
+broker_password = os.getenv('BROKER_PASSWORD', 'password')
 
 # Initialize the scheduler
 scheduler = AsyncIOScheduler()
 router = APIRouter(tags=["Manage Broker Messages"])
-bots_manager = BotsManager(broker_host='localhost', broker_port=1883, broker_username='admin', broker_password='password')
+bots_manager = BotsManager(broker_host=broker_host, broker_port=broker_port, broker_username=broker_username, broker_password=broker_password)
 
 
 def update_active_bots():
