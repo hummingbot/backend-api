@@ -2,7 +2,7 @@ import os
 
 from fastapi import APIRouter, HTTPException
 import logging
-from models import HummingbotInstanceConfig
+from models import HummingbotInstanceConfig, ImageName
 from services import DockerManager
 from utils.bot_archiver import BotArchiver
 
@@ -17,19 +17,35 @@ async def is_docker_running():
     return {"is_docker_running": docker_manager.is_docker_running()}
 
 
+@router.post("/pull-image/")
+async def pull_image(image: ImageName):
+    try:
+        result = docker_manager.pull_image(image.image_name)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/available-images/{image_name}")
+async def available_images(image_name: str):
+    available_images = docker_manager.get_available_images()
+    image_tags = [tag for image in available_images["images"] for tag in image.tags if image_name in tag]
+    return {"available_images": image_tags}
+
+
 @router.get("/active-containers")
 async def active_containers():
-    return {"active_containers": docker_manager.get_active_containers()}
+    return docker_manager.get_active_containers()
 
 
 @router.get("/exited-containers")
 async def exited_containers():
-    return {"exited_containers": docker_manager.get_exited_containers()}
+    return docker_manager.get_exited_containers()
 
 
 @router.post("/clean-exited-containers")
 async def clean_exited_containers():
-    return {"clean_exited_containers": docker_manager.clean_exited_containers()}
+    return docker_manager.clean_exited_containers()
 
 
 @router.post("/remove-container/{container_name}")
@@ -48,6 +64,7 @@ async def remove_container(container_name: str, archive_locally: bool = True, s3
         raise HTTPException(status_code=500, detail=str(e))
 
     return response
+
 
 @router.post("/stop-container/{container_name}")
 async def stop_container(container_name: str):
