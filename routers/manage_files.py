@@ -1,5 +1,5 @@
 from typing import List
-
+import json
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from starlette import status
 
@@ -67,3 +67,19 @@ async def upload_script_config(config_file: UploadFile = File(...), override: bo
         return {"message": "Script configuration uploaded successfully."}
     except FileExistsError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/script-config/{script_name}", response_model=dict)
+async def get_script_config(script_name: str):
+    """
+    Retrieves the configuration parameters for a given script.
+    :param script_name: The name of the script.
+    :return: JSON containing the configuration parameters.
+    """
+    config_class = file_system.load_script_config_class(script_name)
+    if config_class is None:
+        raise HTTPException(status_code=404, detail="Script configuration class not found")
+
+    # Extracting fields and default values
+    config_fields = {field.name: field.default for field in config_class.__fields__.values()}
+    return json.loads(json.dumps(config_fields, default=str))  # Handling non-serializable types like Decimal
