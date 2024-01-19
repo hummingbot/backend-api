@@ -6,7 +6,7 @@ from hummingbot.client.config.config_data_types import BaseClientModel, ClientFi
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionSide
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesConfig
-from hummingbot.smart_components.controllers.dman_v3 import DManV3, DManV3Config
+from hummingbot.smart_components.controllers.dman_v2 import DManV2, DManV2Config
 from hummingbot.smart_components.strategy_frameworks.data_types import (
     ExecutorHandlerStatus,
     TripleBarrierConf,
@@ -20,7 +20,7 @@ from hummingbot.strategy.script_strategy_base import ScriptStrategyBase
 from pydantic import Field
 
 
-class DManV3ScriptConfig(BaseClientModel):
+class DManV2ScriptConfig(BaseClientModel):
     script_file_name: str = Field(default_factory=lambda: os.path.basename(__file__))
 
     # Account configuration
@@ -32,7 +32,7 @@ class DManV3ScriptConfig(BaseClientModel):
         ),
     )
     trading_pairs: str = Field(
-        "DOGE-USDT,INJ-USDT",
+        "DOGE-USDT",
         client_data=ClientFieldData(
             prompt_on_new=True,
             prompt=lambda mi: "List the trading pairs for the bot to trade on, separated by commas (e.g., BTC-USDT,ETH-USDT):",
@@ -55,33 +55,19 @@ class DManV3ScriptConfig(BaseClientModel):
         ),
     )
     candles_interval: str = Field(
-        "30m",
+        "3m",
         client_data=ClientFieldData(
             prompt_on_new=True,
             prompt=lambda mi: "Set the time interval for candles (e.g., 1m, 5m, 1h):",
         ),
     )
-    bollinger_band_length: int = Field(
-        200,
-        client_data=ClientFieldData(
-            prompt_on_new=True,
-            prompt=lambda mi: "Enter the length of the Bollinger Bands (e.g., 200):",
-        ),
-    )
-    bollinger_band_std: float = Field(
-        3.0,
-        client_data=ClientFieldData(
-            prompt_on_new=False,
-            prompt=lambda mi: "Set the standard deviation for the Bollinger Bands (e.g., 2.0):",
-        ),
-    )
 
     # Orders configuration
     order_amount: Decimal = Field(
-        20,
+        25,
         client_data=ClientFieldData(
             prompt_on_new=True,
-            prompt=lambda mi: "Enter the base order amount in quote asset (e.g., 20 USDT):",
+            prompt=lambda mi: "Enter the base order amount in quote asset (e.g., 25 USDT):",
         ),
     )
     n_levels: int = Field(
@@ -95,14 +81,21 @@ class DManV3ScriptConfig(BaseClientModel):
         1.0,
         client_data=ClientFieldData(
             prompt_on_new=True,
-            prompt=lambda mi: "Set the spread of the first order as a ratio of the Bollinger Band value (e.g., 1.0 for upper/lower band):",
+            prompt=lambda mi: "Set the start spread as a multiple of the NATR (e.g., 1.0 for 1x NATR):",
         ),
     )
     step_between_orders: float = Field(
-        0.2,
+        0.8,
         client_data=ClientFieldData(
             prompt_on_new=True,
-            prompt=lambda mi: "Define the step between orders as a ratio of the Bollinger Band value (e.g., 0.1):",
+            prompt=lambda mi: "Define the step between orders as a multiple of the NATR (e.g., 0.8 for 0.8x NATR):",
+        ),
+    )
+    cooldown_time: int = Field(
+        5,
+        client_data=ClientFieldData(
+            prompt_on_new=False,
+            prompt=lambda mi: "Specify the cooldown time in seconds between order placements (e.g., 5):",
         ),
     )
 
@@ -122,19 +115,17 @@ class DManV3ScriptConfig(BaseClientModel):
         ),
     )
     time_limit: int = Field(
-        60 * 60 * 24 * 3,
+        60 * 60 * 12,
         client_data=ClientFieldData(
             prompt_on_new=True,
-            prompt=lambda mi: "Set the time limit in seconds for the triple barrier (e.g., 259200 for 3 days):",
+            prompt=lambda mi: "Set the time limit in seconds for the triple barrier (e.g., 43200 for 12 hours):",
         ),
     )
-
-    # Trailing Stop configuration
     trailing_stop_activation_price_delta: Decimal = Field(
-        0.01,
+        0.0045,
         client_data=ClientFieldData(
             prompt_on_new=True,
-            prompt=lambda mi: "Enter the activation price delta for the trailing stop (e.g., 0.01 for 1%):",
+            prompt=lambda mi: "Enter the activation price delta for the trailing stop (e.g., 0.0045 for 0.45%):",
         ),
     )
     trailing_stop_trailing_delta: Decimal = Field(
@@ -146,53 +137,48 @@ class DManV3ScriptConfig(BaseClientModel):
     )
 
     # Advanced configurations
-    side_filter: bool = Field(
-        True,
+    natr_length: int = Field(
+        100,
         client_data=ClientFieldData(
-            prompt_on_new=False,
-            prompt=lambda mi: "Enable filtering based on trade side (True/False):",
+            prompt_on_new=True,
+            prompt=lambda mi: "Enter the NATR (Normalized Average True Range) length (e.g., 100):",
         ),
     )
-    dynamic_spread_factor: bool = Field(
-        True,
+    macd_fast: int = Field(
+        12,
         client_data=ClientFieldData(
-            prompt_on_new=False,
-            prompt=lambda mi: "Enable dynamic spread factor for more responsive spread adjustments (True/False):",
+            prompt_on_new=True,
+            prompt=lambda mi: "Set the MACD (Moving Average Convergence Divergence) fast length (e.g., 12):",
         ),
     )
-    dynamic_target_spread: bool = Field(
-        False,
+    macd_slow: int = Field(
+        26,
         client_data=ClientFieldData(
-            prompt_on_new=False,
-            prompt=lambda mi: "Activate dynamic target spread to adjust target spread based on the bollinger band (True/False):",
+            prompt_on_new=True,
+            prompt=lambda mi: "Specify the MACD slow length (e.g., 26):",
         ),
     )
-    smart_activation: bool = Field(
-        False,
+    macd_signal: int = Field(
+        9,
         client_data=ClientFieldData(
-            prompt_on_new=False,
-            prompt=lambda mi: "Enable smart activation for intelligent order placement (True/False):",
-        ),
-    )
-    activation_threshold: Decimal = Field(
-        0.001,
-        client_data=ClientFieldData(
-            prompt_on_new=False,
-            prompt=lambda mi: "Set the activation threshold for smart activation (e.g., 0.01 for 1%):",
+            prompt_on_new=True,
+            prompt=lambda mi: "Define the MACD signal length (e.g., 9):",
         ),
     )
 
 
-class DManV3MultiplePairs(ScriptStrategyBase):
+class DManV2MultiplePairs(ScriptStrategyBase):
     @classmethod
-    def init_markets(cls, config: DManV3ScriptConfig):
+    def init_markets(cls, config: DManV2ScriptConfig):
         cls.markets = {config.exchange: set(config.trading_pairs.split(","))}
 
     def __init__(
-        self, connectors: Dict[str, ConnectorBase], config: DManV3ScriptConfig
+        self, connectors: Dict[str, ConnectorBase], config: DManV2ScriptConfig
     ):
         super().__init__(connectors)
         self.config = config
+
+        # Initialize order level builder
         order_level_builder = OrderLevelBuilder(n_levels=config.n_levels)
         order_levels = order_level_builder.build_order_levels(
             amounts=config.order_amount,
@@ -208,13 +194,29 @@ class DManV3MultiplePairs(ScriptStrategyBase):
                 trailing_stop_activation_price_delta=config.trailing_stop_activation_price_delta,
                 trailing_stop_trailing_delta=config.trailing_stop_trailing_delta,
             ),
+            order_refresh_time=config.order_refresh_time,
+            cooldown_time=config.cooldown_time,
         )
+        candles_max_records = (
+            max(
+                [
+                    self.config.natr_length,
+                    self.config.macd_fast,
+                    self.config.macd_slow,
+                    self.config.macd_signal,
+                ]
+            )
+            + 100
+        )  # We need to get more candles than the indicators need
+
+        # Initialize controllers and executor handlers
         self.controllers = {}
-        self.markets = {}
         self.executor_handlers = {}
+        self.markets = {}
 
         for trading_pair in config.trading_pairs.split(","):
-            controller_config = DManV3Config(
+            # Configure the strategy for each trading pair
+            dman_config = DManV2Config(
                 exchange=config.exchange,
                 trading_pair=trading_pair,
                 order_levels=order_levels,
@@ -223,20 +225,22 @@ class DManV3MultiplePairs(ScriptStrategyBase):
                         connector=config.candles_exchange,
                         trading_pair=trading_pair,
                         interval=config.candles_interval,
-                        max_records=config.bollinger_band_length + 200,
-                    ),  # we need more candles to calculate the bollinger bands
+                        max_records=candles_max_records,
+                    ),
                 ],
-                bb_length=config.bollinger_band_length,
-                bb_std=config.bollinger_band_std,
-                side_filter=config.side_filter,
-                dynamic_spread_factor=config.dynamic_spread_factor,
-                dynamic_target_spread=config.dynamic_target_spread,
-                smart_activation=config.smart_activation,
-                activation_threshold=config.activation_threshold,
                 leverage=config.leverage,
+                natr_length=config.natr_length,
+                macd_fast=config.macd_fast,
+                macd_slow=config.macd_slow,
+                macd_signal=config.macd_signal,
             )
-            controller = DManV3(config=controller_config)
+
+            # Instantiate the controller for each trading pair
+            controller = DManV2(config=dman_config)
+            self.markets = controller.update_strategy_markets_dict(self.markets)
             self.controllers[trading_pair] = controller
+
+            # Create and store the executor handler for each trading pair
             self.executor_handlers[trading_pair] = MarketMakingExecutorHandler(
                 strategy=self, controller=controller
             )
