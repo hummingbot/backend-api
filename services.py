@@ -3,7 +3,6 @@ import os
 import shutil
 
 import docker
-import yaml
 from docker.errors import DockerException
 from docker.types import LogConfig
 
@@ -23,8 +22,21 @@ class DockerManager:
         try:
             containers_info = [{"id": container.id, "name": container.name, "status": container.status} for
                                container in self.client.containers.list(filters={"status": "running"}) if
-                               "hummingbot" in container.name]
+                               "hummingbot" in container.name and "broker" not in container.name]
             return {"active_instances": containers_info}
+        except DockerException as e:
+            return str(e)
+
+    def get_available_images(self):
+        try:
+            images = self.client.images.list()
+            return {"images": images}
+        except DockerException as e:
+            return str(e)
+
+    def pull_image(self, image_name):
+        try:
+            self.client.images.pull(image_name)
         except DockerException as e:
             return str(e)
 
@@ -32,7 +44,7 @@ class DockerManager:
         try:
             containers_info = [{"id": container.id, "name": container.name, "status": container.status} for
                                container in self.client.containers.list(filters={"status": "exited"}) if
-                               "hummingbot" in container.name]
+                               "hummingbot" in container.name and "broker" not in container.name]
             return {"exited_instances": containers_info}
         except DockerException as e:
             return str(e)

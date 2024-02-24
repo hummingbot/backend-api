@@ -11,12 +11,19 @@ class BotsManager:
         self.docker_client = docker.from_env()
         self.active_bots = {}
 
+    @staticmethod
+    def hummingbot_containers_fiter(container):
+        try:
+            return "hummingbot" in container.name and "broker" not in container.name
+        except Exception:
+            return False
+
     def get_active_containers(self):
-        return [container.name for container in self.docker_client.containers.list() if container.status == 'running']
+        return [container.name for container in self.docker_client.containers.list()
+                if container.status == 'running' and self.hummingbot_containers_fiter(container)]
 
     def update_active_bots(self):
-        active_containers = self.get_active_containers()
-        active_hbot_containers = [container for container in active_containers if "hummingbot-" in container and "broker" not in container]
+        active_hbot_containers = self.get_active_containers()
 
         # Remove bots that are no longer active
         for bot in list(self.active_bots):

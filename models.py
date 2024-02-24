@@ -11,6 +11,10 @@ class HummingbotInstanceConfig(BaseModel):
     script_config: Optional[str] = None
 
 
+class ImageName(BaseModel):
+    image_name: str
+
+
 class Script(BaseModel):
     name: str
     content: str

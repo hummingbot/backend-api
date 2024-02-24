@@ -10,6 +10,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     env_file:
       - .env
+    environment:
+      - BROKER_HOST=emqx
+      - BROKER_PORT=1883
+    networks:
+      - emqx-bridge
   emqx:
     container_name: hummingbot-broker
     image: emqx:5
