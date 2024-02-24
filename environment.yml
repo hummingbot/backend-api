@@ -3,11 +3,12 @@ channels:
   - conda-forge
   - defaults
 dependencies:
+  - python=3.10
   - fastapi
-  - python=3.11
   - uvicorn
   - pip
   - pip:
+      - hummingbot
       - docker
       - python-dotenv
       - boto3
