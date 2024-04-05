@@ -19,7 +19,7 @@ async def list_scripts():
 
 @router.get("/list-scripts-configs", response_model=List[str])
 async def list_scripts_configs():
-    return file_system.list_files('scripts_configs')
+    return file_system.list_files('scripts')
 
 
 @router.get("/list-credentials", response_model=List[str])
@@ -53,7 +53,7 @@ async def add_script_config(config: ScriptConfig):
         import yaml
         yaml_content = yaml.dump(config.content)
 
-        file_system.add_file('scripts_configs', config.name + '.yml', yaml_content, override=True)
+        file_system.add_file('scripts', config.name + '.yml', yaml_content, override=True)
         return {"message": "Script configuration uploaded successfully."}
     except Exception as e:  # Consider more specific exception handling
         raise HTTPException(status_code=400, detail=str(e))
@@ -63,7 +63,7 @@ async def add_script_config(config: ScriptConfig):
 async def upload_script_config(config_file: UploadFile = File(...), override: bool = False):
     try:
         contents = await config_file.read()
-        file_system.add_file('scripts_configs', config_file.filename, contents.decode(), override)
+        file_system.add_file('scripts', config_file.filename, contents.decode(), override)
         return {"message": "Script configuration uploaded successfully."}
     except FileExistsError as e:
         raise HTTPException(status_code=400, detail=str(e))
