@@ -95,14 +95,20 @@ class DockerManager:
 
         # Copy credentials to instance directory
         source_credentials_dir = os.path.join('bots', 'credentials', config.credentials_profile)
+        script_config_dir = os.path.join('bots', 'conf', 'scripts')
+        controllers_config_dir = os.path.join('bots', 'conf', 'controllers')
         destination_credentials_dir = os.path.join(instance_dir, 'conf')
-        
+        destination_scripts_config_dir = os.path.join(instance_dir, 'conf', 'scripts')
+        destination_controllers_config_dir = os.path.join(instance_dir, 'conf', 'controllers')
+
         # Remove the destination directory if it already exists
         if os.path.exists(destination_credentials_dir):
             shutil.rmtree(destination_credentials_dir)
 
         # Copy the entire contents of source_credentials_dir to destination_credentials_dir     
         shutil.copytree(source_credentials_dir, destination_credentials_dir)
+        shutil.copytree(script_config_dir, destination_scripts_config_dir)
+        shutil.copytree(controllers_config_dir, destination_controllers_config_dir)
         conf_file_path = f"{instance_dir}/conf/conf_client.yml"
         client_config = FileSystemUtil.read_yaml_file(conf_file_path)
         client_config['instance_id'] = instance_name
@@ -112,11 +118,13 @@ class DockerManager:
         volumes = {
             os.path.abspath(os.path.join(bots_path, instance_dir, 'conf')): {'bind': '/home/hummingbot/conf', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_path, instance_dir, 'conf', 'connectors')): {'bind': '/home/hummingbot/conf/connectors', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_path, instance_dir, 'conf', 'scripts')): {'bind': '/home/hummingbot/conf/scripts', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_path, instance_dir, 'conf', 'controllers')): {'bind': '/home/hummingbot/conf/controllers', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_path, instance_dir, 'data')): {'bind': '/home/hummingbot/data', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_path, instance_dir, 'logs')): {'bind': '/home/hummingbot/logs', 'mode': 'rw'},
-            os.path.abspath(os.path.join(bots_path, 'bots', 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'ro'},
-            os.path.abspath(os.path.join(bots_path, 'bots', 'scripts_configs')): {'bind': '/home/hummingbot/conf/scripts', 'mode': 'ro'},
-            os.path.abspath(os.path.join(bots_path, 'bots', 'controllers')): {'bind': '/home/hummingbot/smart_components/controllers', 'mode': 'ro'},
+            os.path.abspath(os.path.join(bots_path, 'bots', 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_path, 'bots', 'controllers')): {'bind': '/home/hummingbot'
+                                                                                      '/controllers', 'mode': 'rw'},
         }
 
         # Set up environment variables
