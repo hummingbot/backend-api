@@ -17,15 +17,6 @@ async def is_docker_running():
     return {"is_docker_running": docker_manager.is_docker_running()}
 
 
-@router.post("/pull-image/")
-async def pull_image(image: ImageName):
-    try:
-        result = docker_manager.pull_image(image.image_name)
-        return result
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
 @router.get("/available-images/{image_name}")
 async def available_images(image_name: str):
     available_images = docker_manager.get_available_images()
@@ -81,3 +72,12 @@ async def create_hummingbot_instance(config: HummingbotInstanceConfig):
     logging.info(f"Creating hummingbot instance with config: {config}")
     response = docker_manager.create_hummingbot_instance(config)
     return response
+
+
+@router.post("/pull-image/")
+async def pull_image(image: ImageName):
+    try:
+        result = docker_manager.pull_image(image.image_name)
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
