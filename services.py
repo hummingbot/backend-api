@@ -122,8 +122,9 @@ class DockerManager:
             os.path.abspath(os.path.join(bots_path, instance_dir, 'conf', 'controllers')): {'bind': '/home/hummingbot/conf/controllers', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_path, instance_dir, 'data')): {'bind': '/home/hummingbot/data', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_path, instance_dir, 'logs')): {'bind': '/home/hummingbot/logs', 'mode': 'rw'},
-            os.path.abspath(os.path.join(bots_path, 'bots', 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'ro'},
-            os.path.abspath(os.path.join(bots_path, 'bots', 'controllers')): {'bind': '/home/hummingbot/smart_components/controllers', 'mode': 'ro'},
+            os.path.abspath(os.path.join(bots_path, 'bots', 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_path, 'bots', 'controllers')): {'bind': '/home/hummingbot'
+                                                                                      '/controllers', 'mode': 'rw'},
         }
 
         # Set up environment variables
