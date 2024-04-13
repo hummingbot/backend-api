@@ -129,7 +129,7 @@ class DockerManager:
 
         # Set up environment variables
         environment = {}
-        password = os.environ.get('CONFIG_PASSWORD', None)
+        password = os.environ.get('CONFIG_PASSWORD', "a")
         if password:
             environment["CONFIG_PASSWORD"] = password
 
