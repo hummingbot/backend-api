@@ -6,7 +6,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import APIRouter, HTTPException
 
 from models import StartBotAction, StopBotAction, ImportStrategyAction
-from utils.bots_manager import BotsManager
+from utils.bots_orchestrator import BotsManager
 broker_host = os.getenv('BROKER_HOST', 'localhost')
 broker_port = int(os.getenv('BROKER_PORT', 1883))
 broker_username = os.getenv('BROKER_USERNAME', 'admin')
