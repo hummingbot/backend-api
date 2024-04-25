@@ -35,7 +35,7 @@ class GenericV2StrategyWithCashOut(StrategyV2Base):
         super().__init__(connectors, config)
         self.config = config
         self.cashing_out = False
-        self.closed_executors_buffer: int = 20
+        self.closed_executors_buffer: int = 50
         if self.config.time_to_cash_out:
             self.cash_out_time = self.config.time_to_cash_out + time.time()
         else:
