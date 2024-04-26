@@ -10,6 +10,7 @@ from pydantic import BaseModel
 router = APIRouter(tags=["Market Data"])
 candles_factory = CandlesFactory()
 
+
 class HistoricalCandlesConfig(BaseModel):
     connector_name: str = "binance_perpetual"
     trading_pair: str = "BTC-USDT"
@@ -50,7 +51,7 @@ async def get_historical_candles(config: HistoricalCandlesConfig):
 
             all_candles.append(fetched_candles)
             last_timestamp = fetched_candles[-1][0]  # Assuming the first column is the timestamp
-            current_start_time = last_timestamp
+            current_start_time = last_timestamp * 1000
 
         final_candles = np.concatenate(all_candles, axis=0) if all_candles else np.array([])
         candles_df = pd.DataFrame(final_candles, columns=candles.columns)
