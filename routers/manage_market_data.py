@@ -32,6 +32,7 @@ async def get_candles(candles_config: CandlesConfig):
     except Exception as e:
         return {"error": str(e)}
 
+
 @router.post("/historical-candles")
 async def get_historical_candles(config: HistoricalCandlesConfig):
     try:
@@ -51,7 +52,7 @@ async def get_historical_candles(config: HistoricalCandlesConfig):
 
             all_candles.append(fetched_candles)
             last_timestamp = fetched_candles[-1][0]  # Assuming the first column is the timestamp
-            current_start_time = last_timestamp * 1000
+            current_start_time = int(last_timestamp)
 
         final_candles = np.concatenate(all_candles, axis=0) if all_candles else np.array([])
         candles_df = pd.DataFrame(final_candles, columns=candles.columns)
