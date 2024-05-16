@@ -41,7 +41,6 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
             start=int(backtesting_config.start_time), end=int(backtesting_config.end_time),
             backtesting_resolution=backtesting_config.backtesting_resolution)
         backtesting_results["processed_data"] = backtesting_results["processed_data"]["features"].to_dict()
-        # backtesting_results["executors"] = [executor.to_dict() for executor in backtesting_results["executors"]]
         return {
             "executors": backtesting_results["executors"],
             "processed_data": backtesting_results["processed_data"],
