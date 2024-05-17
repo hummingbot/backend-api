@@ -35,7 +35,7 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
             controller_config = BacktestingEngine.get_controller_config_instance_from_dict(backtesting_config.config)
         backtesting_engine = BACKTESTING_ENGINES.get(controller_config.controller_type)
         if not backtesting_engine:
-            raise ValueError(f"Controller type {controller_config.controller_type} not found.")
+            raise ValueError(f"Backtesting engine for controller type {controller_config.controller_type} not found.")
         backtesting_results = await backtesting_engine.run_backtesting(
             controller_config=controller_config, trade_cost=backtesting_config.trade_cost,
             start=int(backtesting_config.start_time), end=int(backtesting_config.end_time),
