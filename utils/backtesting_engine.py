@@ -48,37 +48,6 @@ class BacktestingEngine(BacktestingEngineBase):
 
         return config_class(**config_data)
 
-    async def run_backtesting_configs(self,
-                                      controller_configs: List[ControllerConfigBase],
-                                      start: int, end: int,
-                                      backtesting_resolution: str = "1m",
-                                      trade_cost=0.0006):
-        # Load historical candles
-        self.reset_backtesting_data_provider(start, end, backtesting_resolution)
-        self.initialize_controllers(controller_configs)
-        await self.initialize_backtesting_data_provider()
-        results = await self.run_simulations(trade_cost=trade_cost)
-        return results
-
-    async def run_simulations(self, trade_cost=0.0006):
-        results = []
-        for controller in self.controllers:
-            result = await self.run_simulation(controller, trade_cost)
-            results.append(result)
-        return results
-
-
-    async def run_simulation(self, controller, trade_cost):
-        await controller.update_processed_data()
-        executors_info = self.simulate_execution(trade_cost=trade_cost)
-        results = self.summarize_results(executors_info)
-        return {
-            "executors": executors_info,
-            "results": results,
-            "processed_data": controller.processed_data,
-            "config": controller.config
-        }
-
     async def initialize_backtesting_data_provider(self):
         for controller in self.controllers:
             backtesting_config = CandlesConfig(
