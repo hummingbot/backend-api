@@ -4,7 +4,7 @@
 .PHONY: install
 
 run:
-	streamlit run main.py
+	uvicorn main:app --reload
 
 uninstall:
 	conda env remove -n backend-api
