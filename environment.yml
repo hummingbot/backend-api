@@ -10,6 +10,7 @@ dependencies:
   - pip:
       - hummingbot
       - docker
+      - git+https://github.com/felixfontein/docker-py@requests-hotfix
       - python-dotenv
       - boto3
       - python-multipart
