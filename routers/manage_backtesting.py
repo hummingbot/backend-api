@@ -40,7 +40,8 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
             controller_config=controller_config, trade_cost=backtesting_config.trade_cost,
             start=int(backtesting_config.start_time), end=int(backtesting_config.end_time),
             backtesting_resolution=backtesting_config.backtesting_resolution)
-        backtesting_results["processed_data"] = backtesting_results["processed_data"]["features"].to_dict()
+        processed_data = backtesting_results["processed_data"]["features"].fillna(0)
+        backtesting_results["processed_data"] = processed_data.to_dict()
         return {
             "executors": backtesting_results["executors"],
             "processed_data": backtesting_results["processed_data"],
