@@ -2,10 +2,9 @@ from typing import Dict, Union
 
 from fastapi import APIRouter
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
-from hummingbot.strategy_v2.backtesting import DirectionalTradingBacktesting, MarketMakingBacktesting
 from pydantic import BaseModel
 
-from utils.backtesting_engine import BacktestingEngine
+from services.backtesting_engine import BacktestingEngine, DirectionalTradingBacktesting, MarketMakingBacktesting
 
 router = APIRouter(tags=["Market Backtesting"])
 candles_factory = CandlesFactory()
@@ -41,9 +40,10 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
             start=int(backtesting_config.start_time), end=int(backtesting_config.end_time),
             backtesting_resolution=backtesting_config.backtesting_resolution)
         processed_data = backtesting_results["processed_data"]["features"].fillna(0)
+        executors_info = [e.to_dict() for e in backtesting_results["executors"]]
         backtesting_results["processed_data"] = processed_data.to_dict()
         return {
-            "executors": backtesting_results["executors"],
+            "executors": executors_info,
             "processed_data": backtesting_results["processed_data"],
             "results": backtesting_results["results"],
         }
