@@ -5,7 +5,7 @@ from starlette import status
 import yaml
 
 from models import ScriptConfig, Script
-from services.file_system_utils import FileSystemUtil
+from utils.file_system import FileSystemUtil
 
 router = APIRouter(tags=["Files Management"])
 

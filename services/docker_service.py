@@ -7,7 +7,7 @@ from docker.errors import DockerException
 from docker.types import LogConfig
 
 from models import HummingbotInstanceConfig
-from services.file_system_utils import FileSystemUtil
+from utils.file_system import FileSystemUtil
 
 
 class DockerManager:
