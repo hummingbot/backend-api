@@ -4,6 +4,26 @@ from collections import defaultdict
 import docker
 from hbotrc import BotCommands
 from hbotrc.msgs import StatusCommandMessage
+from hbotrc.listener import BotListener
+from hbotrc.spec import TopicSpecs
+
+
+class HummingbotPerformanceListener(BotListener):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        topic_prefix = TopicSpecs.PREFIX.format(
+            namespace=self._ns,
+            instance_id=self._bot_id
+        )
+        self._performance_topic = f'{topic_prefix}{TopicSpecs.LOGS}'
+
+    def _init_endpoints(self):
+        super().__init__()
+        self.performance_report_sub = self.create_subscriber(topic=self._performance_topic,
+                                                             on_message=self._update_bot_performance)
+
+    def _update_bot_performance(self, msg):
+        pass
 
 
 class BotsManager:
@@ -13,6 +33,7 @@ class BotsManager:
         self.broker_username = broker_username
         self.broker_password = broker_password
         self.docker_client = docker.from_env()
+        # self.performance_listener = ETopicListenerFactory()
         self.active_bots = {}
 
     @staticmethod

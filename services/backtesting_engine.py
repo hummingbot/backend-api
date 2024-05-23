@@ -1,5 +1,8 @@
 from typing import List, Dict
 import os
+
+import pandas as pd
+from decimal import Decimal
 import yaml
 import importlib
 import inspect
@@ -70,3 +73,46 @@ class BacktestingEngine(BacktestingEngineBase):
     def reset_backtesting_data_provider(self, start: int, end: int, backtesting_resolution: str):
         self.backtesting_resolution = backtesting_resolution
         self.backtesting_data_provider = BacktestingDataProvider(connectors={}, start_time=start, end_time=end)
+
+    def prepare_market_data(self) -> pd.DataFrame:
+        """
+        Prepares market data by merging candle data with strategy features, filling missing values.
+
+        Returns:
+            pd.DataFrame: The prepared market data with necessary features.
+        """
+        backtesting_candles = self.controller.market_data_provider.get_candles_df(
+            connector_name=self.controller.config.connector_name,
+            trading_pair=self.controller.config.trading_pair,
+            interval=self.backtesting_resolution
+        ).add_suffix("_bt")
+
+        if "features" not in self.controller.processed_data:
+            backtesting_candles["reference_price"] = backtesting_candles["close_bt"]
+            backtesting_candles["spread_multiplier"] = 1
+            backtesting_candles["signal"] = 0
+        else:
+            backtesting_candles = pd.merge_asof(backtesting_candles, self.controller.processed_data["features"],
+                                                left_on="timestamp_bt", right_on="timestamp",
+                                                direction="backward")
+        backtesting_candles["timestamp"] = backtesting_candles["timestamp_bt"]
+        backtesting_candles["open"] = backtesting_candles["open_bt"]
+        backtesting_candles["high"] = backtesting_candles["high_bt"]
+        backtesting_candles["low"] = backtesting_candles["low_bt"]
+        backtesting_candles["close"] = backtesting_candles["close_bt"]
+        backtesting_candles["volume"] = backtesting_candles["volume_bt"]
+        # TODO: Apply this changes in the Base class to avoid code duplication
+        backtesting_candles.dropna(inplace=True)
+        self.controller.processed_data["features"] = backtesting_candles
+        return backtesting_candles
+
+
+class MarketMakingBacktesting(BacktestingEngine):
+    def update_processed_data(self, row: pd.Series):
+        self.controller.processed_data["reference_price"] = Decimal(row["reference_price"])
+        self.controller.processed_data["spread_multiplier"] = Decimal(row["spread_multiplier"])
+
+
+class DirectionalTradingBacktesting(BacktestingEngineBase):
+    def update_processed_data(self, row: pd.Series):
+        self.controller.processed_data["signal"] = row["signal"]
