@@ -1,6 +1,3 @@
-import re
-from collections import defaultdict
-
 import docker
 from hbotrc import BotCommands
 from hbotrc.msgs import StatusCommandMessage
@@ -15,15 +12,21 @@ class HummingbotPerformanceListener(BotListener):
             namespace=self._ns,
             instance_id=self._bot_id
         )
-        self._performance_topic = f'{topic_prefix}{TopicSpecs.LOGS}'
+        self._performance_topic = f'{topic_prefix}/performance'
+        self._bot_performance = {}
+        self.performance_report_sub = None
+
+    def get_bot_performance(self):
+        return self._bot_performance
 
     def _init_endpoints(self):
         super().__init__()
-        self.performance_report_sub = self.create_subscriber(topic=self._performance_topic,
-                                                             on_message=self._update_bot_performance)
+        self.performance_report_sub = self.create_psubscriber(topic=self._performance_topic,
+                                                              on_message=self._update_bot_performance)
 
-    def _update_bot_performance(self, msg):
-        pass
+    def _update_bot_performance(self, msg, topic):
+        for controller_id, performance_report in msg.items():
+            self._bot_performance[controller_id] = performance_report
 
 
 class BotsManager:
@@ -33,7 +36,6 @@ class BotsManager:
         self.broker_username = broker_username
         self.broker_password = broker_password
         self.docker_client = docker.from_env()
-        # self.performance_listener = ETopicListenerFactory()
         self.active_bots = {}
 
     @staticmethod
@@ -58,14 +60,18 @@ class BotsManager:
         # Add new bots or update existing ones
         for bot in active_hbot_containers:
             if bot not in self.active_bots:
+                hbot_listener = HummingbotPerformanceListener(host=self.broker_host, port=self.broker_port,
+                                                              username=self.broker_username,
+                                                              password=self.broker_password,
+                                                              bot_id=bot)
+                hbot_listener.start()
                 self.active_bots[bot] = {
                     "bot_name": bot,
                     "broker_client": BotCommands(host=self.broker_host, port=self.broker_port,
                                                  username=self.broker_username, password=self.broker_password,
-                                                 bot_id=bot)
+                                                 bot_id=bot),
+                    "broker_listener": hbot_listener,
                 }
-        for bot, data in self.active_bots.items():
-            data["status"] = self.get_bot_status(bot)
 
     # Interact with a specific bot
     def start_bot(self, bot_name, **kwargs):
@@ -86,73 +92,11 @@ class BotsManager:
 
     def get_bot_status(self, bot_name, **kwargs):
         if bot_name in self.active_bots:
-            status: StatusCommandMessage = self.active_bots[bot_name]["broker_client"].status(**kwargs)
-            return self.parse_status_message(status.msg)
+            return self.active_bots[bot_name]["broker_listener"].get_bot_performance()
 
     def get_bot_history(self, bot_name, **kwargs):
         if bot_name in self.active_bots:
             return self.active_bots[bot_name]["broker_client"].history(**kwargs)
-
-    def parse_status_message(self, msg):
-        data = {}
-
-        # Extracting total balances
-        balance_pattern = r"Balances:\s*\n([\s\S]+?)\n\n"
-        balances = re.search(balance_pattern, msg)
-        balances_dict = {}
-        if balances:
-            balance_lines = balances.group(1).strip().split('\n')
-            for line in balance_lines:
-                parts = re.split(r'\s{2,}', line.strip())
-                if len(parts) >= 4:
-                    exchange, asset, total, available = parts[0], parts[1], parts[2], parts[3]
-                    if exchange not in balances_dict:
-                        balances_dict[exchange] = {}
-                    balances_dict[exchange][asset] = available
-        data['total_balances'] = balances_dict
-
-        # Extract controller specific data and assess running status
-        controller_data_dict = {}
-        controllers = re.finditer(
-            r"Controller:\s*([^\n]+)\s*\n\+[-+]+\+\n([\s\S]+?)\nRealized PNL \(Quote\): ([-\d.]+) \| Unrealized PNL \(Quote\): ([-\d.]+)--> Global PNL \(Quote\): ([-\d.]+) \| Global PNL \(%\): ([-\d.]+)%\nTotal Volume Traded: ([\d.]+)",
-            msg)
-        for controller in controllers:
-            controller_name = controller.group(1)
-            controller_data = controller.group(2)
-            realized_pnl_quote = controller.group(3)
-            unrealized_pnl_quote = controller.group(4)
-            global_pnl_quote = controller.group(5)
-            global_pnl_pct = controller.group(6)
-            total_volume_traded = controller.group(7)
-
-
-            controller_data_dict[controller_name] = {
-                'realized_pnl_quote': realized_pnl_quote,
-                'unrealized_pnl_quote': unrealized_pnl_quote,
-                'global_pnl_quote': global_pnl_quote,
-                'global_pnl_pct': global_pnl_pct,
-                'total_volume_traded': total_volume_traded,
-            }
-
-        data['controllers'] = controller_data_dict
-
-        # Determining running status from the controller data
-        running_status = self.determine_running_status(msg)
-        data['running_status'] = running_status
-        # Extract global performance summary
-        global_performance_pattern = (
-            r"Global Performance Summary:\nGlobal PNL \(Quote\): ([-\d.]+) \| Global PNL \(%\): ([-\d.]+)% \| "
-            r"Total Volume Traded \(Global\): ([\d.]+)"
-        )
-        global_performance = re.search(global_performance_pattern, msg)
-        if global_performance:
-            data['global_performance'] = {
-                'global_pnl_quote': global_performance.group(1),
-                'global_pnl_pct': global_performance.group(2),
-                'total_volume_traded': global_performance.group(3)
-            }
-
-        return data
 
     @staticmethod
     def determine_running_status(controller_data):
@@ -165,5 +109,5 @@ class BotsManager:
     def get_all_bots_status(self):
         all_bots_status = {}
         for bot, bot_info in self.active_bots.items():
-            all_bots_status[bot] = {key: value for key, value in bot_info.items() if key != "broker_client"}
+            all_bots_status[bot] = bot_info["broker_listener"].get_bot_performance()
         return all_bots_status

@@ -11,7 +11,6 @@ from hummingbot.strategy_v2.backtesting.backtesting_engine_base import Backtesti
 from hummingbot.exceptions import InvalidController
 from hummingbot.strategy_v2.backtesting.backtesting_data_provider import BacktestingDataProvider
 from hummingbot.strategy_v2.controllers import ControllerConfigBase, MarketMakingControllerConfigBase, DirectionalTradingControllerConfigBase
-from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 
 import config
 
@@ -50,29 +49,6 @@ class BacktestingEngine(BacktestingEngineBase):
             raise InvalidController(f"No configuration class found in the module {controller_name}.")
 
         return config_class(**config_data)
-
-    async def initialize_backtesting_data_provider(self):
-        for controller in self.controllers:
-            backtesting_config = CandlesConfig(
-                connector=controller.config.connector_name,
-                trading_pair=controller.config.trading_pair,
-                interval=self.backtesting_resolution
-            )
-            await controller.market_data_provider.initialize_candles_feed(backtesting_config)
-            for config in controller.config.candles_config:
-                await controller.market_data_provider.initialize_candles_feed(config)
-
-    def initialize_controllers(self, controller_configs: List[ControllerConfigBase]):
-        self.controllers = []
-        for controller_config in controller_configs:
-            controller_class = controller_config.get_controller_class()
-            controllers = controller_class(config=controller_config, market_data_provider=backtesting_data_provider,
-                                           actions_queue=None)
-            self.controllers.append(controllers)
-
-    def reset_backtesting_data_provider(self, start: int, end: int, backtesting_resolution: str):
-        self.backtesting_resolution = backtesting_resolution
-        self.backtesting_data_provider = BacktestingDataProvider(connectors={}, start_time=start, end_time=end)
 
     def prepare_market_data(self) -> pd.DataFrame:
         """
@@ -113,6 +89,6 @@ class MarketMakingBacktesting(BacktestingEngine):
         self.controller.processed_data["spread_multiplier"] = Decimal(row["spread_multiplier"])
 
 
-class DirectionalTradingBacktesting(BacktestingEngineBase):
+class DirectionalTradingBacktesting(BacktestingEngine):
     def update_processed_data(self, row: pd.Series):
         self.controller.processed_data["signal"] = row["signal"]
