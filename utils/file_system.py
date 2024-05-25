@@ -38,6 +38,32 @@ class FileSystemUtil:
         dir_path = os.path.join(self.base_path, directory)
         return [d for d in os.listdir(dir_path) if os.path.isdir(os.path.join(dir_path, d))]
 
+    def create_folder(self, directory: str, folder_name: str):
+        """
+        Creates a folder in a specified directory.
+        :param directory: The directory to create the folder in.
+        :param folder_name: The name of the folder to be created.
+        """
+        folder_path = os.path.join(self.base_path, directory, folder_name)
+        os.makedirs(folder_path, exist_ok=True)
+
+    def delete_folder(self, directory: str, folder_name: str):
+        """
+        Deletes a folder in a specified directory.
+        :param directory: The directory to delete the folder from.
+        :param folder_name: The name of the folder to be deleted.
+        """
+        folder_path = os.path.join(self.base_path, directory, folder_name)
+        os.rmdir(folder_path)
+
+    def path_exists(self, path: str) -> bool:
+        """
+        Checks if a path exists.
+        :param path: The path to check.
+        :return: True if the path exists, False otherwise.
+        """
+        return os.path.exists(os.path.join(self.base_path, path))
+
     def add_file(self, directory: str, file_name: str, content: str, override: bool = False):
         """
         Adds a file to a specified directory.
@@ -95,3 +121,4 @@ class FileSystemUtil:
         except Exception as e:
             print(f"Error loading script class: {e}")  # Handle or log the error appropriately
         return None
+
