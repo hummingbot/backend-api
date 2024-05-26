@@ -19,7 +19,7 @@ class HummingbotPerformanceListener(BotListener):
         return self._bot_performance
 
     def _init_endpoints(self):
-        super().__init__()
+        super()._init_endpoints()
         self.performance_report_sub = self.create_subscriber(topic=self._performance_topic,
                                                              on_message=self._update_bot_performance)
 
