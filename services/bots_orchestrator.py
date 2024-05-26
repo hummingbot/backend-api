@@ -81,7 +81,9 @@ class BotsManager:
 
     def stop_bot(self, bot_name, **kwargs):
         if bot_name in self.active_bots:
+            self.active_bots[bot_name]["broker_listener"].stop()
             return self.active_bots[bot_name]["broker_client"].stop(**kwargs)
+
 
     def import_strategy_for_bot(self, bot_name, strategy, **kwargs):
         if bot_name in self.active_bots:
