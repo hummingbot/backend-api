@@ -35,8 +35,6 @@ async def shutdown_event():
 @router.get("/get-active-bots-status")
 def get_active_bots_status():
     """Returns the cached status of all active bots."""
-    if not bots_manager.active_bots:
-        raise HTTPException(status_code=404, detail="No active bots found")
     return {"status": "success", "data": bots_manager.get_all_bots_status()}
 
 

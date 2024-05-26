@@ -1,7 +1,10 @@
+import logging
+
 import docker
 from hbotrc import BotCommands
 from hbotrc.listener import BotListener
 from hbotrc.spec import TopicSpecs
+from hummingbot.connector.connector_base import Decimal
 
 
 class HummingbotPerformanceListener(BotListener):
@@ -88,24 +91,45 @@ class BotsManager:
         if bot_name in self.active_bots:
             return self.active_bots[bot_name]["broker_client"].config(params, **kwargs)
 
-    def get_bot_status(self, bot_name, **kwargs):
-        if bot_name in self.active_bots:
-            return self.active_bots[bot_name]["broker_listener"].get_bot_performance()
-
     def get_bot_history(self, bot_name, **kwargs):
         if bot_name in self.active_bots:
             return self.active_bots[bot_name]["broker_client"].history(**kwargs)
 
     @staticmethod
-    def determine_running_status(controller_data):
-        if "Market connectors are not ready" in controller_data:
-            return "starting"  # Bot is starting but not ready
-        elif "No strategy is currently running" in controller_data:
-            return "stopped"  # The bot is stopped
-        return "running"  # Default to running if none of the above
+    def determine_controller_performance(controllers_performance):
+        cleaned_performance = {}
+        for controller, performance in controllers_performance.items():
+            try:
+                # Check if all the metrics are numeric
+                _ = sum(metric for key, metric in performance.items() if key != "close_type_counts")
+                cleaned_performance[controller] = {
+                    "status": "running",
+                    "performance": performance
+                }
+            except Exception as e:
+                cleaned_performance[controller] = {
+                    "status": "error",
+                    "error": "Some metrics are not numeric, check logs and restart controller",
+                }
+        return cleaned_performance
 
     def get_all_bots_status(self):
         all_bots_status = {}
-        for bot, bot_info in self.active_bots.items():
-            all_bots_status[bot] = bot_info["broker_listener"].get_bot_performance()
+        for bot in self.active_bots:
+            all_bots_status[bot] = self.get_bot_status(bot)
         return all_bots_status
+
+    def get_bot_status(self, bot_name):
+        if bot_name in self.active_bots:
+            try:
+                controllers_performance = self.active_bots[bot_name]["broker_listener"].get_bot_performance()
+                performance = self.determine_controller_performance(controllers_performance)
+                status = "running" if len(performance) > 0 else "stopped"
+                return {
+                    "status": status,
+                    "performance": performance}
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": str(e)
+                }
