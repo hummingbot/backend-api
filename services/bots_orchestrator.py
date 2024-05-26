@@ -20,10 +20,10 @@ class HummingbotPerformanceListener(BotListener):
 
     def _init_endpoints(self):
         super().__init__()
-        self.performance_report_sub = self.create_psubscriber(topic=self._performance_topic,
-                                                              on_message=self._update_bot_performance)
+        self.performance_report_sub = self.create_subscriber(topic=self._performance_topic,
+                                                             on_message=self._update_bot_performance)
 
-    def _update_bot_performance(self, msg, topic):
+    def _update_bot_performance(self, msg):
         for controller_id, performance_report in msg.items():
             self._bot_performance[controller_id] = performance_report
 
