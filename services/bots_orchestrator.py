@@ -77,6 +77,7 @@ class BotsManager:
     # Interact with a specific bot
     def start_bot(self, bot_name, **kwargs):
         if bot_name in self.active_bots:
+            self.active_bots[bot_name]["broker_listener"].start()
             return self.active_bots[bot_name]["broker_client"].start(**kwargs)
 
     def stop_bot(self, bot_name, **kwargs):
