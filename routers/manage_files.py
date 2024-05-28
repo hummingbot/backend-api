@@ -10,7 +10,7 @@ from utils.file_system import FileSystemUtil
 router = APIRouter(tags=["Files Management"])
 
 
-file_system = FileSystemUtil(base_path="bots")
+file_system = FileSystemUtil()
 
 
 @router.get("/list-scripts", response_model=List[str])
@@ -85,7 +85,7 @@ async def update_controller_config(bot_name: str, controller_id: str, config: Di
         raise HTTPException(status_code=400, detail="Bot not found.")
     current_config = file_system.read_yaml_file(f"bots/{bots_config_path}/{controller_id}.yml")
     current_config.update(config)
-    file_system.dump_dict_to_yaml(current_config, f"bots/{bots_config_path}/{controller_id}.yml")
+    file_system.dump_dict_to_yaml(f"bots/{bots_config_path}/{controller_id}.yml", current_config)
     return {"message": "Controller configuration updated successfully."}
 
 
