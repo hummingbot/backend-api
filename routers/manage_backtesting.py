@@ -42,6 +42,8 @@ async def run_backtesting(backtesting_config: BacktestingConfig):
         processed_data = backtesting_results["processed_data"]["features"].fillna(0)
         executors_info = [e.to_dict() for e in backtesting_results["executors"]]
         backtesting_results["processed_data"] = processed_data.to_dict()
+        results = backtesting_results["results"]
+        results["sharpe_ratio"] = results["sharpe_ratio"] if results["sharpe_ratio"] is not None else 0
         return {
             "executors": executors_info,
             "processed_data": backtesting_results["processed_data"],
