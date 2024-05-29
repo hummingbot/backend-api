@@ -9,6 +9,7 @@ from docker.types import LogConfig
 from models import HummingbotInstanceConfig
 from utils.file_system import FileSystemUtil
 
+file_system = FileSystemUtil()
 
 class DockerManager:
     def __init__(self):
@@ -112,7 +113,7 @@ class DockerManager:
         conf_file_path = f"{instance_dir}/conf/conf_client.yml"
         client_config = FileSystemUtil.read_yaml_file(conf_file_path)
         client_config['instance_id'] = instance_name
-        FileSystemUtil.dump_dict_to_yaml(client_config, conf_file_path)
+        FileSystemUtil.dump_dict_to_yaml(conf_file_path, client_config)
 
         # Set up Docker volumes
         volumes = {
