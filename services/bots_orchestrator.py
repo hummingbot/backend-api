@@ -30,6 +30,10 @@ class HummingbotPerformanceListener(BotListener):
         for controller_id, performance_report in msg.items():
             self._bot_performance[controller_id] = performance_report
 
+    def stop(self):
+        super().stop()
+        self._bot_performance = {}
+
 
 class BotsManager:
     def __init__(self, broker_host, broker_port, broker_username, broker_password):
