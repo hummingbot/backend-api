@@ -89,10 +89,6 @@ async def update_controller_config(bot_name: str, controller_id: str, config: Di
     return {"message": "Controller configuration updated successfully."}
 
 
-@router.get("/list-credentials", response_model=List[str])
-async def list_credentials():
-    return file_system.list_folders('credentials')
-
 
 @router.post("/add-script", status_code=status.HTTP_201_CREATED)
 async def add_script(script: Script, override: bool = False):
