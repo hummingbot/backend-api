@@ -9,7 +9,8 @@ dependencies:
   - pip
   - pip:
       - hummingbot
-      - docker
+#      - docker
+      - git+https://github.com/felixfontein/docker-py
       - python-dotenv
       - boto3
       - python-multipart

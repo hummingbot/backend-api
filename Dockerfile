@@ -1,6 +1,11 @@
 # Start from a base image with Miniconda installed
 FROM continuumio/miniconda3
 
+# Install system dependencies
+RUN apt-get update && \
+    apt-get install -y sudo libusb-1.0 python3-dev gcc && \
+    rm -rf /var/lib/apt/lists/*
+
 # Set the working directory in the container
 WORKDIR /backend-api
 

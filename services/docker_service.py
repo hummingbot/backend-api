@@ -7,8 +7,9 @@ from docker.errors import DockerException
 from docker.types import LogConfig
 
 from models import HummingbotInstanceConfig
-from utils.file_system_utils import FileSystemUtil
+from utils.file_system import FileSystemUtil
 
+file_system = FileSystemUtil()
 
 class DockerManager:
     def __init__(self):
@@ -87,16 +88,16 @@ class DockerManager:
     def create_hummingbot_instance(self, config: HummingbotInstanceConfig):
         bots_path = os.environ.get('BOTS_PATH', self.SOURCE_PATH)  # Default to 'SOURCE_PATH' if BOTS_PATH is not set
         instance_name = f"hummingbot-{config.instance_name}"
-        instance_dir = os.path.join('bots', 'instances', instance_name)
+        instance_dir = os.path.join("bots", 'instances', instance_name)
         if not os.path.exists(instance_dir):
             os.makedirs(instance_dir)
             os.makedirs(os.path.join(instance_dir, 'data'))
             os.makedirs(os.path.join(instance_dir, 'logs'))
 
         # Copy credentials to instance directory
-        source_credentials_dir = os.path.join('bots', 'credentials', config.credentials_profile)
-        script_config_dir = os.path.join('bots', 'conf', 'scripts')
-        controllers_config_dir = os.path.join('bots', 'conf', 'controllers')
+        source_credentials_dir = os.path.join("bots", 'credentials', config.credentials_profile)
+        script_config_dir = os.path.join("bots", 'conf', 'scripts')
+        controllers_config_dir = os.path.join("bots", 'conf', 'controllers')
         destination_credentials_dir = os.path.join(instance_dir, 'conf')
         destination_scripts_config_dir = os.path.join(instance_dir, 'conf', 'scripts')
         destination_controllers_config_dir = os.path.join(instance_dir, 'conf', 'controllers')
@@ -112,7 +113,7 @@ class DockerManager:
         conf_file_path = f"{instance_dir}/conf/conf_client.yml"
         client_config = FileSystemUtil.read_yaml_file(conf_file_path)
         client_config['instance_id'] = instance_name
-        FileSystemUtil.dump_dict_to_yaml(client_config, conf_file_path)
+        FileSystemUtil.dump_dict_to_yaml(conf_file_path, client_config)
 
         # Set up Docker volumes
         volumes = {
@@ -122,14 +123,13 @@ class DockerManager:
             os.path.abspath(os.path.join(bots_path, instance_dir, 'conf', 'controllers')): {'bind': '/home/hummingbot/conf/controllers', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_path, instance_dir, 'data')): {'bind': '/home/hummingbot/data', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_path, instance_dir, 'logs')): {'bind': '/home/hummingbot/logs', 'mode': 'rw'},
-            os.path.abspath(os.path.join(bots_path, 'bots', 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'rw'},
-            os.path.abspath(os.path.join(bots_path, 'bots', 'controllers')): {'bind': '/home/hummingbot'
-                                                                                      '/controllers', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_path, "bots", 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'rw'},
+            os.path.abspath(os.path.join(bots_path, "bots", 'controllers')): {'bind': '/home/hummingbot/controllers', 'mode': 'rw'},
         }
 
         # Set up environment variables
         environment = {}
-        password = os.environ.get('CONFIG_PASSWORD', None)
+        password = os.environ.get('CONFIG_PASSWORD', "a")
         if password:
             environment["CONFIG_PASSWORD"] = password
 

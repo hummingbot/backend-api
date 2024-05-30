@@ -3,8 +3,8 @@ import os
 from fastapi import APIRouter, HTTPException
 import logging
 from models import HummingbotInstanceConfig, ImageName
-from services import DockerManager
-from utils.bot_archiver import BotArchiver
+from services.bot_archiver import BotArchiver
+from services.docker_service import DockerManager
 
 router = APIRouter(tags=["Docker Management"])
 docker_manager = DockerManager()

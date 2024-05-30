@@ -1,16 +1,16 @@
-from typing import List
+from typing import List, Dict
 import json
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from starlette import status
 import yaml
 
 from models import ScriptConfig, Script
-from utils.file_system_utils import FileSystemUtil
+from utils.file_system import FileSystemUtil
 
 router = APIRouter(tags=["Files Management"])
 
 
-file_system = FileSystemUtil(base_path="bots")
+file_system = FileSystemUtil()
 
 
 @router.get("/list-scripts", response_model=List[str])
@@ -66,9 +66,28 @@ async def get_all_controller_configs():
     return configs
 
 
-@router.get("/list-credentials", response_model=List[str])
-async def list_credentials():
-    return file_system.list_folders('credentials')
+@router.get("/all-controller-configs/bot/{bot_name}", response_model=List[dict])
+async def get_all_controller_configs_for_bot(bot_name: str):
+    configs = []
+    bots_config_path = f"instances/{bot_name}/conf/controllers"
+    if not file_system.path_exists(bots_config_path):
+        raise HTTPException(status_code=400, detail="Bot not found.")
+    for controller in file_system.list_files(bots_config_path):
+        config = file_system.read_yaml_file(f"bots/{bots_config_path}/{controller}")
+        configs.append(config)
+    return configs
+
+
+@router.post("/update-controller-config/bot/{bot_name}/{controller_id}")
+async def update_controller_config(bot_name: str, controller_id: str, config: Dict):
+    bots_config_path = f"instances/{bot_name}/conf/controllers"
+    if not file_system.path_exists(bots_config_path):
+        raise HTTPException(status_code=400, detail="Bot not found.")
+    current_config = file_system.read_yaml_file(f"bots/{bots_config_path}/{controller_id}.yml")
+    current_config.update(config)
+    file_system.dump_dict_to_yaml(f"bots/{bots_config_path}/{controller_id}.yml", current_config)
+    return {"message": "Controller configuration updated successfully."}
+
 
 
 @router.post("/add-script", status_code=status.HTTP_201_CREATED)
@@ -129,3 +148,4 @@ async def upload_controller_config(config_file: UploadFile = File(...), override
         return {"message": "Controller configuration uploaded successfully."}
     except FileExistsError as e:
         raise HTTPException(status_code=400, detail=str(e))
+

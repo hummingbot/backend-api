@@ -38,8 +38,12 @@ class BotArchiver:
         shutil.make_archive(output_path.replace('.tar.gz', ''), 'gztar', source_dir)
         print(f"Compressed {source_dir} into {output_path}")
 
-    def archive_locally(self, instance_name, instance_dir):
-        archive_name = f"{instance_name}_archive.tar.gz"
-        archive_path = os.path.join('bots', 'archived', archive_name)
-        self.compress_directory(instance_dir, archive_path)
-        shutil.rmtree(instance_dir)  # Remove the instance directory
+    def archive_locally(self, instance_name, instance_dir, compress=False):
+        if compress:
+            archive_name = f"{instance_name}_archive.tar.gz"
+            archive_path = os.path.join('bots', 'archived', archive_name)
+            self.compress_directory(instance_dir, archive_path)
+            shutil.rmtree(instance_dir)  # Remove the instance directory
+        else:
+            archive_path = os.path.join('bots', 'archived', instance_name)
+            shutil.move(instance_dir, archive_path)
