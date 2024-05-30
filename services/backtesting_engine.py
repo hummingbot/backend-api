@@ -9,7 +9,6 @@ import inspect
 
 from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
 from hummingbot.exceptions import InvalidController
-from hummingbot.strategy_v2.backtesting.backtesting_data_provider import BacktestingDataProvider
 from hummingbot.strategy_v2.controllers import ControllerConfigBase, MarketMakingControllerConfigBase, DirectionalTradingControllerConfigBase
 
 import config
@@ -71,7 +70,7 @@ class BacktestingEngine(BacktestingEngineBase):
             backtesting_candles = pd.merge_asof(backtesting_candles, self.controller.processed_data["features"],
                                                 left_on="timestamp_bt", right_on="timestamp",
                                                 direction="backward")
-        backtesting_candles["timestamp"] = backtesting_candles["timestamp_bt"]
+        backtesting_candles["timestamp"] = backtesting_candles["timestamp_bt"] // 1e3
         backtesting_candles["open"] = backtesting_candles["open_bt"]
         backtesting_candles["high"] = backtesting_candles["high_bt"]
         backtesting_candles["low"] = backtesting_candles["low_bt"]
