@@ -58,6 +58,7 @@ async def get_historical_candles(config: HistoricalCandlesConfig):
         final_candles = np.concatenate(all_candles, axis=0) if all_candles else np.array([])
         candles_df = pd.DataFrame(final_candles, columns=candles.columns)
         candles_df.drop_duplicates(subset=["timestamp"], inplace=True)
+        candles_df["timestamp"] = candles_df["timestamp"] // 1e3
         return candles_df
     except Exception as e:
         return {"error": str(e)}
