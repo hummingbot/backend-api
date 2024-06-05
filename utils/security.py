@@ -7,12 +7,12 @@ from hummingbot.client.config.config_helpers import ClientConfigAdapter, update_
 from hummingbot.client.config.security import Security
 from utils.file_system import FileSystemUtil
 
-from config import PASSWORD_VERIFICATION_PATH, BOTS_PATH
+from config import PASSWORD_VERIFICATION_PATH
 from utils.models import BackendAPIConfigAdapter
 
 
 class BackendAPISecurity(Security):
-    fs_util = FileSystemUtil(base_path=BOTS_PATH + "/credentials")
+    fs_util = FileSystemUtil(base_path="bots/credentials")
 
     @classmethod
     def login_account(cls, account_name: str, secrets_manager: BaseSecretsManager) -> bool:

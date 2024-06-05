@@ -6,11 +6,10 @@ import docker
 from docker.errors import DockerException
 from docker.types import LogConfig
 
-from config import BOTS_PATH
 from models import HummingbotInstanceConfig
 from utils.file_system import FileSystemUtil
 
-file_system = FileSystemUtil(base_path=BOTS_PATH)
+file_system = FileSystemUtil()
 
 class DockerManager:
     def __init__(self):

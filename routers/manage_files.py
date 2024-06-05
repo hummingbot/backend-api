@@ -4,14 +4,13 @@ from fastapi import APIRouter, HTTPException, UploadFile, File
 from starlette import status
 import yaml
 
-from config import BOTS_PATH
 from models import ScriptConfig, Script
 from utils.file_system import FileSystemUtil
 
 router = APIRouter(tags=["Files Management"])
 
 
-file_system = FileSystemUtil(base_path=BOTS_PATH)
+file_system = FileSystemUtil()
 
 
 @router.get("/list-scripts", response_model=List[str])

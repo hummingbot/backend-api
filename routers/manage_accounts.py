@@ -5,14 +5,13 @@ from fastapi import APIRouter, HTTPException
 from hummingbot.client.settings import AllConnectorSettings
 from starlette import status
 
-from config import BOTS_PATH
 from services.accounts_service import AccountsService
 from utils.file_system import FileSystemUtil
 
 # Initialize the scheduler
 scheduler = AsyncIOScheduler()
 router = APIRouter(tags=["Manage Credentials"])
-file_system = FileSystemUtil(base_path=BOTS_PATH)
+file_system = FileSystemUtil(base_path="bots/credentials")
 accounts_service = AccountsService()
 
 

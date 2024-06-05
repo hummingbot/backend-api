@@ -9,12 +9,12 @@ from hummingbot.client.config.config_helpers import ClientConfigAdapter, ReadOnl
     get_connector_class
 from hummingbot.client.settings import AllConnectorSettings
 
-from config import CONFIG_PASSWORD, BOTS_PATH
+from config import CONFIG_PASSWORD
 from utils.file_system import FileSystemUtil
 from utils.models import BackendAPIConfigAdapter
 from utils.security import BackendAPISecurity
 
-file_system = FileSystemUtil(base_path=BOTS_PATH)
+file_system = FileSystemUtil()
 
 
 class AccountsService:

@@ -7,7 +7,6 @@ load_dotenv()
 CONTROLLERS_PATH = "bots/conf/controllers"
 CONTROLLERS_MODULE = "bots.controllers"
 CONFIG_PASSWORD = os.getenv("CONFIG_PASSWORD", "a")
-BOTS_PATH = os.getenv("BOTS_PATH", "bots")
 BROKER_HOST = os.getenv("BROKER_HOST", "localhost")
 BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 BROKER_USERNAME = os.getenv("BROKER_USERNAME", "admin")
