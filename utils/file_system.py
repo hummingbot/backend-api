@@ -32,8 +32,9 @@ class FileSystemUtil:
         :param directory: The directory to list files from.
         :return: List of file names in the directory.
         """
+        excluded_files = ["__init__.py", "__pycache__", ".DS_Store", ".dockerignore", ".gitignore"]
         dir_path = os.path.join(self.base_path, directory)
-        return [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f))]
+        return [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and f not in excluded_files]
 
     def list_folders(self, directory: str) -> List[str]:
         """
