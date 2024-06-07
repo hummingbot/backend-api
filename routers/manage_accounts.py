@@ -95,7 +95,8 @@ async def delete_credential(account_name: str, connector_name: str):
 @router.post("/add-connector-keys/{account_name}/{connector_name}", status_code=status.HTTP_201_CREATED)
 async def add_connector_keys(account_name: str, connector_name: str, keys: Dict):
     try:
-        accounts_service.add_connector_keys(account_name, connector_name, keys)
+        await accounts_service.add_connector_keys(account_name, connector_name, keys)
         return {"message": "Connector keys added successfully."}
     except Exception as e:
+        accounts_service.delete_credentials(account_name, connector_name)
         raise HTTPException(status_code=400, detail=str(e))
