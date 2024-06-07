@@ -103,12 +103,15 @@ class AccountsService:
         connector_config = BackendAPIConfigAdapter(AllConnectorSettings.get_connector_config_keys(connector_name))
         return [key for key in connector_config.hb_config.__fields__.keys() if key != "connector"]
 
-    def add_connector_keys(self, account_name: str, connector_name: str, keys: dict):
-        connector_config = BackendAPIConfigAdapter(AllConnectorSettings.get_connector_config_keys(connector_name))
+    async def add_connector_keys(self, account_name: str, connector_name: str, keys: dict):
         BackendAPISecurity.login_account(account_name=account_name, secrets_manager=self.secrets_manager)
+        connector_config = BackendAPIConfigAdapter(AllConnectorSettings.get_connector_config_keys(connector_name))
         for key, value in keys.items():
             setattr(connector_config, key, value)
         BackendAPISecurity.update_connector_keys(account_name, connector_config)
+        new_connector = self.get_connector(account_name, connector_name)
+        await new_connector._update_balances()
+        self.accounts[account_name][connector_name] = new_connector
 
     def get_connector(self, account_name: str, connector_name: str):
         """
@@ -120,7 +123,6 @@ class AccountsService:
         BackendAPISecurity.login_account(account_name=account_name, secrets_manager=self.secrets_manager)
         client_config_map = ClientConfigAdapter(ClientConfigMap())
         conn_setting = AllConnectorSettings.get_connector_settings()[connector_name]
-        # await BackendAPISecurity.wait_til_decryption_done()
         keys = BackendAPISecurity.api_keys(connector_name)
         read_only_config = ReadOnlyClientConfigAdapter.lock_config(client_config_map)
         init_params = conn_setting.conn_init_parameters(
@@ -161,7 +163,7 @@ class AccountsService:
         :param connector_name: The name of the connector.
         :return:
         """
-        file_system.delete_file(f'credentials/{account_name}/connectors/{connector_name}.yml')
+        file_system.delete_file(directory=f"credentials/{account_name}/connectors", file_name=f"{connector_name}.yml")
 
     @staticmethod
     def add_account(account_name: str):
