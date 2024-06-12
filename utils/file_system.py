@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import importlib
@@ -119,6 +120,17 @@ class FileSystemUtil:
         if not override and os.path.exists(file_path):
             raise FileExistsError(f"File '{file_name}' already exists in '{directory}'.")
         with open(file_path, 'w') as file:
+            file.write(content)
+
+    def append_to_file(self, directory: str, file_name: str, content: str):
+        """
+        Appends content to a specified file.
+        :param directory: The directory containing the file.
+        :param file_name: The name of the file to append to.
+        :param content: The content to append to the file.
+        """
+        file_path = os.path.join(self.base_path, directory, file_name)
+        with open(file_path, 'a') as file:
             file.write(content)
 
     @staticmethod
