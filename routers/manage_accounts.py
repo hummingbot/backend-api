@@ -19,7 +19,7 @@ accounts_service = AccountsService()
 async def startup_event():
     # Add the job to the scheduler
     scheduler.start()
-    accounts_service.start_update_balances_loop()
+    accounts_service.start_update_account_state_loop()
 
 
 @router.on_event("shutdown")
@@ -28,9 +28,21 @@ async def shutdown_event():
     scheduler.shutdown()
 
 
-@router.get("/get-all-balances", response_model=Dict[str, Dict[str, Dict[str, float]]])
-async def get_all_balances():
-    return accounts_service.get_all_balances()
+@router.get("/accounts-state", response_model=Dict[str, Dict[str, List[Dict]]])
+async def get_all_accounts_state():
+    return accounts_service.get_accounts_state()
+
+
+@router.get("/account-state-history", response_model=List[Dict])
+async def get_account_state_history():
+    """
+    Get the historical state of all accounts.
+    """
+    try:
+        history = accounts_service.load_account_state_history()
+        return history
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/available-connectors", response_model=List[str])
@@ -41,6 +53,7 @@ async def available_connectors():
 @router.get("/connector-config-map/{connector_name}", response_model=List[str])
 async def get_connector_config_map(connector_name: str):
     return accounts_service.get_connector_config_map(connector_name)
+
 
 @router.get("/all-connectors-config-map", response_model=Dict[str, List[str]])
 async def get_all_connectors_config_map():
