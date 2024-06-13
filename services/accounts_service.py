@@ -309,9 +309,12 @@ class AccountsService:
         :param connector_name:
         :return:
         """
-        file_system.delete_file(directory=f"credentials/{account_name}/connectors", file_name=f"{connector_name}.yml")
-        self.accounts[account_name].pop(connector_name)
-        self.accounts_state[account_name].pop(connector_name)
+        if file_system.path_exists(f"credentials/{account_name}/connectors/{connector_name}.yml"):
+            file_system.delete_file(directory=f"credentials/{account_name}/connectors", file_name=f"{connector_name}.yml")
+            if connector_name in self.accounts[account_name]:
+                self.accounts[account_name].pop(connector_name)
+            if connector_name in self.accounts_state[account_name]:
+                self.accounts_state[account_name].pop(connector_name)
 
     def add_account(self, account_name: str):
         """
@@ -336,3 +339,4 @@ class AccountsService:
         """
         file_system.delete_folder('credentials', account_name)
         self.accounts.pop(account_name)
+        self.accounts_state.pop(account_name)

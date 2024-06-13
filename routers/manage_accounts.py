@@ -111,4 +111,5 @@ async def add_connector_keys(account_name: str, connector_name: str, keys: Dict)
         await accounts_service.add_connector_keys(account_name, connector_name, keys)
         return {"message": "Connector keys added successfully."}
     except Exception as e:
+        accounts_service.delete_credentials(account_name, connector_name)
         raise HTTPException(status_code=400, detail=str(e))
