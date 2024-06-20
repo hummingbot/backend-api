@@ -36,7 +36,6 @@ class AccountsService:
         self.accounts = {}
         self.initialize_accounts()
         self.update_account_state_interval = update_account_state_interval_minutes * 60
-        self.update_account_state_interval = update_account_state_interval_minutes * 60
         self.default_quote = default_quote
         self.accounts_state = {}
         self.history_file = account_history_file
