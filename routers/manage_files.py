@@ -89,7 +89,6 @@ async def update_controller_config(bot_name: str, controller_id: str, config: Di
     return {"message": "Controller configuration updated successfully."}
 
 
-
 @router.post("/add-script", status_code=status.HTTP_201_CREATED)
 async def add_script(script: Script, override: bool = False):
     try:
@@ -140,6 +139,7 @@ async def add_controller_config(config: ScriptConfig):
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
 @router.post("/upload-controller-config")
 async def upload_controller_config(config_file: UploadFile = File(...), override: bool = False):
     try:
@@ -149,3 +149,11 @@ async def upload_controller_config(config_file: UploadFile = File(...), override
     except FileExistsError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+
+@router.post("/delete-controller-config", status_code=status.HTTP_200_OK)
+async def delete_controller_config(config_name: str):
+    try:
+        file_system.delete_file('conf/controllers', config_name)
+        return {"message": f"Controller configuration {config_name} deleted successfully."}
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))

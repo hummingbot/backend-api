@@ -12,7 +12,7 @@ from utils.models import BackendAPIConfigAdapter
 
 
 class BackendAPISecurity(Security):
-    fs_util = FileSystemUtil("bots/credentials")
+    fs_util = FileSystemUtil(base_path="bots/credentials")
 
     @classmethod
     def login_account(cls, account_name: str, secrets_manager: BaseSecretsManager) -> bool:

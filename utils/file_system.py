@@ -1,3 +1,4 @@
+import json
 import logging
 import os
 import importlib
@@ -32,8 +33,9 @@ class FileSystemUtil:
         :param directory: The directory to list files from.
         :return: List of file names in the directory.
         """
+        excluded_files = ["__init__.py", "__pycache__", ".DS_Store", ".dockerignore", ".gitignore"]
         dir_path = os.path.join(self.base_path, directory)
-        return [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f))]
+        return [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f)) and f not in excluded_files]
 
     def list_folders(self, directory: str) -> List[str]:
         """
@@ -118,6 +120,17 @@ class FileSystemUtil:
         if not override and os.path.exists(file_path):
             raise FileExistsError(f"File '{file_name}' already exists in '{directory}'.")
         with open(file_path, 'w') as file:
+            file.write(content)
+
+    def append_to_file(self, directory: str, file_name: str, content: str):
+        """
+        Appends content to a specified file.
+        :param directory: The directory containing the file.
+        :param file_name: The name of the file to append to.
+        :param content: The content to append to the file.
+        """
+        file_path = os.path.join(self.base_path, directory, file_name)
+        with open(file_path, 'a') as file:
             file.write(content)
 
     @staticmethod

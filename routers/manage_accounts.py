@@ -11,7 +11,7 @@ from utils.file_system import FileSystemUtil
 # Initialize the scheduler
 scheduler = AsyncIOScheduler()
 router = APIRouter(tags=["Manage Credentials"])
-file_system = FileSystemUtil()
+file_system = FileSystemUtil(base_path="bots/credentials")
 accounts_service = AccountsService()
 
 
@@ -19,7 +19,7 @@ accounts_service = AccountsService()
 async def startup_event():
     # Add the job to the scheduler
     scheduler.start()
-    accounts_service.start_update_balances_loop()
+    accounts_service.start_update_account_state_loop()
 
 
 @router.on_event("shutdown")
@@ -28,9 +28,21 @@ async def shutdown_event():
     scheduler.shutdown()
 
 
-@router.get("/get-all-balances", response_model=Dict[str, Dict[str, Dict[str, float]]])
-async def get_all_balances():
-    return accounts_service.get_all_balances()
+@router.get("/accounts-state", response_model=Dict[str, Dict[str, List[Dict]]])
+async def get_all_accounts_state():
+    return accounts_service.get_accounts_state()
+
+
+@router.get("/account-state-history", response_model=List[Dict])
+async def get_account_state_history():
+    """
+    Get the historical state of all accounts.
+    """
+    try:
+        history = accounts_service.load_account_state_history()
+        return history
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/available-connectors", response_model=List[str])
@@ -41,6 +53,7 @@ async def available_connectors():
 @router.get("/connector-config-map/{connector_name}", response_model=List[str])
 async def get_connector_config_map(connector_name: str):
     return accounts_service.get_connector_config_map(connector_name)
+
 
 @router.get("/all-connectors-config-map", response_model=Dict[str, List[str]])
 async def get_all_connectors_config_map():
@@ -95,7 +108,8 @@ async def delete_credential(account_name: str, connector_name: str):
 @router.post("/add-connector-keys/{account_name}/{connector_name}", status_code=status.HTTP_201_CREATED)
 async def add_connector_keys(account_name: str, connector_name: str, keys: Dict):
     try:
-        accounts_service.add_connector_keys(account_name, connector_name, keys)
+        await accounts_service.add_connector_keys(account_name, connector_name, keys)
         return {"message": "Connector keys added successfully."}
     except Exception as e:
+        accounts_service.delete_credentials(account_name, connector_name)
         raise HTTPException(status_code=400, detail=str(e))

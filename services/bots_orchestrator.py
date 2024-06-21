@@ -1,4 +1,5 @@
 import logging
+from collections import deque
 
 import docker
 from hbotrc import BotCommands
@@ -16,10 +17,18 @@ class HummingbotPerformanceListener(BotListener):
         )
         self._performance_topic = f'{topic_prefix}/performance'
         self._bot_performance = {}
+        self._bot_error_logs = deque(maxlen=100)
+        self._bot_general_logs = deque(maxlen=100)
         self.performance_report_sub = None
 
     def get_bot_performance(self):
         return self._bot_performance
+
+    def get_bot_error_logs(self):
+        return list(self._bot_error_logs)
+
+    def get_bot_general_logs(self):
+        return list(self._bot_general_logs)
 
     def _init_endpoints(self):
         super()._init_endpoints()
@@ -29,6 +38,12 @@ class HummingbotPerformanceListener(BotListener):
     def _update_bot_performance(self, msg):
         for controller_id, performance_report in msg.items():
             self._bot_performance[controller_id] = performance_report
+
+    def _on_log(self, log):
+        if log.level_name == "ERROR":
+            self._bot_error_logs.append(log)
+        else:
+            self._bot_general_logs.append(log)
 
     def stop(self):
         super().stop()
@@ -129,12 +144,18 @@ class BotsManager:
     def get_bot_status(self, bot_name):
         if bot_name in self.active_bots:
             try:
-                controllers_performance = self.active_bots[bot_name]["broker_listener"].get_bot_performance()
+                broker_listner = self.active_bots[bot_name]["broker_listener"]
+                controllers_performance = broker_listner.get_bot_performance()
                 performance = self.determine_controller_performance(controllers_performance)
+                error_logs = broker_listner.get_bot_error_logs()
+                general_logs = broker_listner.get_bot_general_logs()
                 status = "running" if len(performance) > 0 else "stopped"
                 return {
                     "status": status,
-                    "performance": performance}
+                    "performance": performance,
+                    "error_logs": error_logs,
+                    "general_logs": general_logs
+                }
             except Exception as e:
                 return {
                     "status": "error",
