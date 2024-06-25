@@ -335,6 +335,7 @@ class AccountsService:
         for file in files_to_copy:
             file_system.copy_file(f"credentials/master_account/{file}", f"credentials/{account_name}/{file}")
         self.accounts[account_name] = {}
+        self.accounts_state[account_name] = {}
 
     def delete_account(self, account_name: str):
         """
