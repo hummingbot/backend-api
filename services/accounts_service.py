@@ -30,7 +30,7 @@ class AccountsService:
                  update_account_state_interval_minutes: int = 1,
                  default_quote: str = "USDT",
                  account_history_file: str = "account_state_history.json",
-                 account_history_dump_interval_minutes: int = 1):
+                 account_history_dump_interval_minutes: int = 10):
         # TODO: Add database to store the balances of each account each time it is updated.
         self.secrets_manager = ETHKeyFileSecretManger(CONFIG_PASSWORD)
         self.accounts = {}
