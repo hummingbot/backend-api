@@ -265,6 +265,7 @@ class AccountsService:
         await new_connector._update_balances()
         self.accounts[account_name][connector_name] = new_connector
         await self.update_account_state()
+        await self.dump_account_state()
 
     def get_connector(self, account_name: str, connector_name: str):
         """
