@@ -262,8 +262,9 @@ class AccountsService:
             setattr(connector_config, key, value)
         BackendAPISecurity.update_connector_keys(account_name, connector_config)
         new_connector = self.get_connector(account_name, connector_name)
-        self.accounts[account_name][connector_name] = new_connector
         await new_connector._update_balances()
+        self.accounts[account_name][connector_name] = new_connector
+        await self.update_account_state()
 
     def get_connector(self, account_name: str, connector_name: str):
         """
