@@ -34,10 +34,11 @@ class AccountsService:
         # TODO: Add database to store the balances of each account each time it is updated.
         self.secrets_manager = ETHKeyFileSecretManger(CONFIG_PASSWORD)
         self.accounts = {}
+        self.accounts_state = {}
+        self.account_state_update_event = asyncio.Event()
         self.initialize_accounts()
         self.update_account_state_interval = update_account_state_interval_minutes * 60
         self.default_quote = default_quote
-        self.accounts_state = {}
         self.history_file = account_history_file
         self.account_history_dump_interval = account_history_dump_interval_minutes
 
@@ -76,25 +77,32 @@ class AccountsService:
         The loop that dumps the current account state to a file at fixed intervals.
         :return:
         """
+        await self.account_state_update_event.wait()
         while True:
-            now = datetime.now()
-            next_log_time = (now + timedelta(minutes=self.account_history_dump_interval)).replace(second=0, microsecond=0)
-            next_log_time = next_log_time - timedelta(minutes=next_log_time.minute % self.account_history_dump_interval)
-            sleep_duration = (next_log_time - now).total_seconds()
-            await asyncio.sleep(sleep_duration)
             try:
                 await self.dump_account_state()
             except Exception as e:
                 logging.error(f"Error dumping account state: {e}")
+            finally:
+                now = datetime.now()
+                next_log_time = (now + timedelta(minutes=self.account_history_dump_interval)).replace(second=0,
+                                                                                                      microsecond=0)
+                next_log_time = next_log_time - timedelta(
+                    minutes=next_log_time.minute % self.account_history_dump_interval)
+                sleep_duration = (next_log_time - now).total_seconds()
+                await asyncio.sleep(sleep_duration)
 
     async def dump_account_state(self):
         """
-        Dump the current account state to a JSON file.
+        Dump the current account state to a JSON file. Create it if the file not exists.
         :return:
         """
         timestamp = datetime.now().isoformat()
         state_to_dump = {"timestamp": timestamp, "state": self.accounts_state}
-        file_system.append_to_file("data", self.history_file, json.dumps(state_to_dump) + "\n")
+        if not file_system.path_exists(path=f"data/{self.history_file}"):
+            file_system.add_file(directory="data", file_name=self.history_file, content=json.dumps(state_to_dump) + "\n")
+        else:
+            file_system.append_to_file(directory="data", file_name=self.history_file, content=json.dumps(state_to_dump) + "\n")
 
     def load_account_state_history(self):
         """
@@ -220,6 +228,7 @@ class AccountsService:
                             "value": float(price * balance["units"]),
                             "available_units": float(connector.get_available_balance(balance["token"]))
                         })
+                    self.account_state_update_event.set()
                 except Exception as e:
                     logging.error(
                         f"Error updating balances for connector {connector_name} in account {account_name}: {e}")
@@ -256,8 +265,10 @@ class AccountsService:
             setattr(connector_config, key, value)
         BackendAPISecurity.update_connector_keys(account_name, connector_config)
         new_connector = self.get_connector(account_name, connector_name)
-        self.accounts[account_name][connector_name] = new_connector
         await new_connector._update_balances()
+        self.accounts[account_name][connector_name] = new_connector
+        await self.update_account_state()
+        await self.dump_account_state()
 
     def get_connector(self, account_name: str, connector_name: str):
         """
@@ -329,6 +340,7 @@ class AccountsService:
         for file in files_to_copy:
             file_system.copy_file(f"credentials/master_account/{file}", f"credentials/{account_name}/{file}")
         self.accounts[account_name] = {}
+        self.accounts_state[account_name] = {}
 
     def delete_account(self, account_name: str):
         """
