@@ -44,21 +44,23 @@ async def get_historical_candles(config: HistoricalCandlesConfig):
         )
         candles = candles_factory.get_candle(candles_config)
         all_candles = []
-        current_start_time = config.start_time
-
-        while current_start_time <= config.end_time:
-            fetched_candles = await candles.fetch_candles(start_time=current_start_time)
+        current_end_time = config.end_time + candles.interval_in_seconds
+        current_start_time = config.start_time - candles.interval_in_seconds
+        while current_end_time >= current_start_time:
+            fetched_candles = await candles.fetch_candles(end_time=current_end_time)
             if fetched_candles.size < 1:
                 break
 
             all_candles.append(fetched_candles)
-            last_timestamp = fetched_candles[-1][0]  # Assuming the first column is the timestamp
-            current_start_time = int(last_timestamp)
-
-        final_candles = np.concatenate(all_candles, axis=0) if all_candles else np.array([])
+            last_timestamp = candles.ensure_timestamp_in_seconds(
+                fetched_candles[0][0])  # Assuming the first column is the timestamp
+            current_end_time = last_timestamp - candles.interval_in_seconds
+            candles.check_candles_sorted_and_equidistant(all_candles)
+        final_candles = np.concatenate(all_candles[::-1], axis=0) if all_candles else np.array([])
         candles_df = pd.DataFrame(final_candles, columns=candles.columns)
         candles_df.drop_duplicates(subset=["timestamp"], inplace=True)
-        candles_df["timestamp"] = candles_df["timestamp"] // 1e3
+        candles_df = candles_df[
+            (candles_df["timestamp"] <= config.end_time) & (candles_df["timestamp"] >= config.start_time)]
         return candles_df
     except Exception as e:
         return {"error": str(e)}
