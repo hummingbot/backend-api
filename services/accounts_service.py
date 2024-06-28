@@ -30,14 +30,15 @@ class AccountsService:
                  update_account_state_interval_minutes: int = 1,
                  default_quote: str = "USDT",
                  account_history_file: str = "account_state_history.json",
-                 account_history_dump_interval_minutes: int = 10):
+                 account_history_dump_interval_minutes: int = 1):
         # TODO: Add database to store the balances of each account each time it is updated.
         self.secrets_manager = ETHKeyFileSecretManger(CONFIG_PASSWORD)
         self.accounts = {}
+        self.accounts_state = {}
+        self.account_state_update_event = asyncio.Event()
         self.initialize_accounts()
         self.update_account_state_interval = update_account_state_interval_minutes * 60
         self.default_quote = default_quote
-        self.accounts_state = {}
         self.history_file = account_history_file
         self.account_history_dump_interval = account_history_dump_interval_minutes
 
@@ -76,6 +77,7 @@ class AccountsService:
         The loop that dumps the current account state to a file at fixed intervals.
         :return:
         """
+        await self.account_state_update_event.wait()
         while True:
             try:
                 await self.dump_account_state()
@@ -226,6 +228,7 @@ class AccountsService:
                             "value": float(price * balance["units"]),
                             "available_units": float(connector.get_available_balance(balance["token"]))
                         })
+                    self.account_state_update_event.set()
                 except Exception as e:
                     logging.error(
                         f"Error updating balances for connector {connector_name} in account {account_name}: {e}")
