@@ -10,8 +10,27 @@ from fastapi import APIRouter
 router = APIRouter(tags=["Market Performance"])
 
 
-@router.post("/run-performance")
-async def run_performance(executors: List[dict], config: dict):
+@router.post("/get-performance-results")
+async def get_performance_results(executors: List[dict]):
+    performance_results = {}
+    try:
+        for executor in executors:
+            if isinstance(executor["custom_info"], str):
+                executor["custom_info"] = json.loads(executor["custom_info"])
+        parsed_executors = [ExecutorInfo(**executor) for executor in executors]
+        performance_results["results"] = BacktestingEngine.summarize_results(parsed_executors)
+        results = performance_results["results"]
+        results["sharpe_ratio"] = results["sharpe_ratio"] if results["sharpe_ratio"] is not None else 0
+        return {
+            "results": performance_results["results"],
+        }
+
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/get-performance-results-with-config")
+async def get_performance_results_with_config(executors: List[dict], config: dict):
     performance_results = {}
     try:
         controller_config = BacktestingEngine.get_controller_config_instance_from_dict(config)
@@ -32,27 +51,3 @@ async def run_performance(executors: List[dict], config: dict):
 
     except Exception as e:
         return {"error": str(e)}
-
-
-def parse_executors(executors: List[dict]) -> List[ExecutorInfo]:
-    executor_values = []
-    for row in executors:
-        executor_values.append(ExecutorInfo(
-            id=row["id"],
-            timestamp=row["timestamp"],
-            type=row["type"],
-            close_timestamp=row["close_timestamp"],
-            close_type=row["close_type"],
-            status=row["status"],
-            config=row["config"],
-            net_pnl_pct=row["net_pnl_pct"],
-            net_pnl_quote=row["net_pnl_quote"],
-            cum_fees_quote=row["cum_fees_quote"],
-            filled_amount_quote=row["filled_amount_quote"],
-            is_active=row["is_active"],
-            is_trading=row["is_trading"],
-            custom_info=json.loads(row["custom_info"]),
-            controller_id=row["controller_id"],
-            side=row["side"],
-        ))
-    return executor_values
