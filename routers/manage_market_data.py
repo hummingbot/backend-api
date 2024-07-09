@@ -43,9 +43,12 @@ async def get_historical_candles(config: HistoricalCandlesConfig):
             interval=config.interval
         )
         candles = candles_factory.get_candle(candles_config)
+        # TODO: Check if this method works after candles refactor
+        # await candles.initialize_exchange_data()
         all_candles = []
         current_end_time = config.end_time + candles.interval_in_seconds
         current_start_time = config.start_time - candles.interval_in_seconds
+        candles.max_records = int((current_end_time - current_start_time) / candles.interval_in_seconds)
         while current_end_time >= current_start_time:
             fetched_candles = await candles.fetch_candles(end_time=current_end_time)
             if fetched_candles.size < 1:
