@@ -200,3 +200,22 @@ class FileSystemUtil:
                 outfile.write(cm_yml_str)
         except Exception as e:
             logging.error("Error writing configs: %s" % (str(e),), exc_info=True)
+
+    def list_databases(self, full_path: bool = True):
+        archived_instances = self.list_folders("archived")
+        for archived_instance in archived_instances:
+            if full_path:
+                archived_databases = [f"bots/archived/{archived_instance}/data/{db}" for db in self.list_files(f"archived/{archived_instance}/data") if db.endswith(".sqlite")]
+            else:
+                archived_databases = [db for db in self.list_files(f"archived/{archived_instance}/data") if db.endswith(".sqlite")]
+            return archived_databases
+
+    def list_checkpoints(self, full_path: bool):
+        dir_path = os.path.join(self.base_path, "data")
+        if full_path:
+            checkpoints = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f))
+                           and f.startswith("checkpoint") and f.endswith(".sqlite")]
+        else:
+            checkpoints = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f))
+                           and f.startswith("checkpoint") and f.endswith(".sqlite")]
+        return checkpoints
