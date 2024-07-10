@@ -200,3 +200,12 @@ class FileSystemUtil:
                 outfile.write(cm_yml_str)
         except Exception as e:
             logging.error("Error writing configs: %s" % (str(e),), exc_info=True)
+
+    def list_databases(self, full_path: bool = True):
+        archived_instances = self.list_folders("archived")
+        for archived_instance in archived_instances:
+            if full_path:
+                archived_databases = [f"archived/{archived_instance}/data/{db}" for db in self.list_files(f"archived/{archived_instance}/data") if db.endswith(".sqlite")]
+            else:
+                archived_databases = [db for db in self.list_files(f"archived/{archived_instance}/data") if db.endswith(".sqlite")]
+            return archived_databases

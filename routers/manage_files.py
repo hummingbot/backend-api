@@ -13,6 +13,11 @@ router = APIRouter(tags=["Files Management"])
 file_system = FileSystemUtil()
 
 
+@router.get("/list-databases", response_model=List[str])
+async def list_databases(full_path: bool):
+    return file_system.list_databases(full_path)
+
+
 @router.get("/list-scripts", response_model=List[str])
 async def list_scripts():
     return file_system.list_files('scripts')
