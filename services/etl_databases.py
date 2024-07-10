@@ -243,23 +243,6 @@ class ETLPerformance:
         with self.session_maker() as session:
             query = "SELECT * FROM executors"
             executors = pd.read_sql_query(text(query), session.connection())
-            # executors["timestamp"] = executors["timestamp"].apply(lambda x: self.ensure_timestamp_in_seconds(x))
-            # executors["close_timestamp"] = executors["close_timestamp"].apply(lambda x: self.ensure_timestamp_in_seconds(x))
-            # # executors["datetime"] = pd.to_datetime(executors.timestamp, unit="s")
-            # # executors["close_datetime"] = pd.to_datetime(executors["close_timestamp"], unit="s")
-            # executors["status"] = executors["status"].apply(lambda x: self.get_enum_by_value(RunnableStatus, int(x)))
-            # executors["trading_pair"] = executors["config"].apply(lambda x: json.loads(x)["trading_pair"])
-            # executors["exchange"] = executors["config"].apply(lambda x: json.loads(x)["connector_name"])
-            # executors["side"] = executors["config"].apply(lambda x: self.get_enum_by_value(TradeType, int(json.loads(x)["side"])))
-            # executors["close_type"] = executors["close_type"].apply(lambda x: self.get_enum_by_value(CloseType, int(x)))
-            # executors["close_type_name"] = executors["close_type"].apply(lambda x: x.name)
-            # executors["level_id"] = executors["config"].apply(lambda x: json.loads(x).get("level_id") if json.loads(x).get("level_id") is not None else 0)
-            # executors["bep"] = executors["custom_info"].apply(lambda x: json.loads(x)["current_position_average_price"])
-            # executors["close_price"] = executors["custom_info"].apply(lambda x: json.loads(x)["close_price"])
-            # executors["sl"] = executors["config"].apply(lambda x: json.loads(x)["stop_loss"]).fillna(0)
-            # executors["tp"] = executors["config"].apply(lambda x: json.loads(x)["take_profit"]).fillna(0)
-            # executors["tl"] = executors["config"].apply(lambda x: json.loads(x)["time_limit"]).fillna(0)
-            # executors = executors[~executors["close_timestamp"].isna()]
             return executors
 
     def load_trade_fill(self):
