@@ -1,31 +1,20 @@
 from typing import List
 
 import pandas_ta as ta  # noqa: F401
-from pydantic import Field, validator
-
 from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy_v2.controllers.directional_trading_controller_base import (
     DirectionalTradingControllerBase,
     DirectionalTradingControllerConfigBase,
 )
+from pydantic import Field, validator
 
 
 class MACDBBV1ControllerConfig(DirectionalTradingControllerConfigBase):
     controller_name = "macd_bb_v1"
     candles_config: List[CandlesConfig] = []
-    candles_connector: str = Field(
-        default=None,
-        client_data=ClientFieldData(
-            prompt_on_new=True,
-            prompt=lambda mi: "Enter the connector for the candles data, leave empty to use the same exchange as the connector: ", )
-    )
-    candles_trading_pair: str = Field(
-        default=None,
-        client_data=ClientFieldData(
-            prompt_on_new=True,
-            prompt=lambda mi: "Enter the trading pair for the candles data, leave empty to use the same trading pair as the connector: ", )
-    )
+    candles_connector: str = Field(default=None)
+    candles_trading_pair: str = Field(default=None)
     interval: str = Field(
         default="3m",
         client_data=ClientFieldData(

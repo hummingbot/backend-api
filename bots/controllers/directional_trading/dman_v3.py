@@ -3,8 +3,6 @@ from decimal import Decimal
 from typing import List, Optional, Tuple
 
 import pandas_ta as ta  # noqa: F401
-from pydantic import Field, validator
-
 from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
@@ -14,23 +12,14 @@ from hummingbot.strategy_v2.controllers.directional_trading_controller_base impo
 )
 from hummingbot.strategy_v2.executors.dca_executor.data_types import DCAExecutorConfig, DCAMode
 from hummingbot.strategy_v2.executors.position_executor.data_types import TrailingStop
+from pydantic import Field, validator
 
 
 class DManV3ControllerConfig(DirectionalTradingControllerConfigBase):
     controller_name: str = "dman_v3"
     candles_config: List[CandlesConfig] = []
-    candles_connector: str = Field(
-        default=None,
-        client_data=ClientFieldData(
-            prompt_on_new=True,
-            prompt=lambda mi: "Enter the connector for the candles data, leave empty to use the same exchange as the connector: ",)
-    )
-    candles_trading_pair: str = Field(
-        default=None,
-        client_data=ClientFieldData(
-            prompt_on_new=True,
-            prompt=lambda mi: "Enter the trading pair for the candles data, leave empty to use the same trading pair as the connector: ",)
-    )
+    candles_connector: str = Field(default=None)
+    candles_trading_pair: str = Field(default=None)
     interval: str = Field(
         default="30m",
         client_data=ClientFieldData(
@@ -61,9 +50,10 @@ class DManV3ControllerConfig(DirectionalTradingControllerConfigBase):
     dca_spreads: List[Decimal] = Field(
         default="0.001,0.018,0.15,0.25",
         client_data=ClientFieldData(
-            prompt=lambda mi: "Enter the spreads for each DCA level (comma-separated) if dynamic_spread=True this value "
-                              "will multiply the Bollinger Bands width, e.g. if the Bollinger Bands width is 0.1 (10%)"
-                              "and the spread is 0.2, the distance of the order to the current price will be 0.02 (2%) ",
+            prompt=lambda
+                mi: "Enter the spreads for each DCA level (comma-separated) if dynamic_spread=True this value "
+                    "will multiply the Bollinger Bands width, e.g. if the Bollinger Bands width is 0.1 (10%)"
+                    "and the spread is 0.2, the distance of the order to the current price will be 0.02 (2%) ",
             prompt_on_new=True))
     dca_amounts_pct: List[Decimal] = Field(
         default=None,
@@ -119,7 +109,9 @@ class DManV3ControllerConfig(DirectionalTradingControllerConfigBase):
             return [Decimal('1.0') / len(spreads) for _ in spreads]
         return v
 
-    def get_spreads_and_amounts_in_quote(self, trade_type: TradeType, total_amount_quote: Decimal) -> Tuple[List[Decimal], List[Decimal]]:
+    def get_spreads_and_amounts_in_quote(self,
+                                         trade_type: TradeType,
+                                         total_amount_quote: Decimal) -> Tuple[List[Decimal], List[Decimal]]:
         amounts_pct = self.dca_amounts_pct
         if amounts_pct is None:
             # Equally distribute if amounts_pct is not set
@@ -151,6 +143,7 @@ class DManV3Controller(DirectionalTradingControllerBase):
     Mean reversion strategy with Grid execution making use of Bollinger Bands indicator to make spreads dynamic
     and shift the mid-price.
     """
+
     def __init__(self, config: DManV3ControllerConfig, *args, **kwargs):
         self.config = config
         self.max_records = config.bb_length
@@ -201,8 +194,9 @@ class DManV3Controller(DirectionalTradingControllerBase):
             prices = [price * (1 + spread * spread_multiplier) for spread in spread]
         if self.config.dynamic_target:
             stop_loss = self.config.stop_loss * spread_multiplier
-            trailing_stop = TrailingStop(activation_price=self.config.trailing_stop.activation_price * spread_multiplier,
-                                         trailing_delta=self.config.trailing_stop.trailing_delta * spread_multiplier)
+            trailing_stop = TrailingStop(
+                activation_price=self.config.trailing_stop.activation_price * spread_multiplier,
+                trailing_delta=self.config.trailing_stop.trailing_delta * spread_multiplier)
         else:
             stop_loss = self.config.stop_loss
             trailing_stop = self.config.trailing_stop

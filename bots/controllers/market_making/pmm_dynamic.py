@@ -2,8 +2,6 @@ from decimal import Decimal
 from typing import List
 
 import pandas_ta as ta  # noqa: F401
-from pydantic import Field, validator
-
 from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy_v2.controllers.market_making_controller_base import (
@@ -11,6 +9,7 @@ from hummingbot.strategy_v2.controllers.market_making_controller_base import (
     MarketMakingControllerConfigBase,
 )
 from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig
+from pydantic import Field, validator
 
 
 class PMMDynamicControllerConfig(MarketMakingControllerConfigBase):
@@ -32,13 +31,15 @@ class PMMDynamicControllerConfig(MarketMakingControllerConfigBase):
         default=None,
         client_data=ClientFieldData(
             prompt_on_new=True,
-            prompt=lambda mi: "Enter the connector for the candles data, leave empty to use the same exchange as the connector: ", )
+            prompt=lambda mi: "Enter the connector for the candles data, leave empty to use the same "
+                              "exchange as the connector: ", )
     )
     candles_trading_pair: str = Field(
         default=None,
         client_data=ClientFieldData(
             prompt_on_new=True,
-            prompt=lambda mi: "Enter the trading pair for the candles data, leave empty to use the same trading pair as the connector: ", )
+            prompt=lambda mi: "Enter the trading pair for the candles data, leave empty to use the same "
+                              "trading pair as the connector: ", )
     )
     interval: str = Field(
         default="3m",
@@ -85,6 +86,7 @@ class PMMDynamicController(MarketMakingControllerBase):
     This is a dynamic version of the PMM controller.It uses the MACD to shift the mid-price and the NATR
     to make the spreads dynamic. It also uses the Triple Barrier Strategy to manage the risk.
     """
+
     def __init__(self, config: PMMDynamicControllerConfig, *args, **kwargs):
         self.config = config
         self.max_records = max(config.macd_slow, config.macd_fast, config.macd_signal, config.natr_length) + 10

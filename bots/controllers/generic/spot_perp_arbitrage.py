@@ -1,20 +1,13 @@
-import time
 from decimal import Decimal
 from typing import Dict, List, Set
 
-import pandas as pd
-from pydantic import Field, validator
-
 from hummingbot.client.config.config_data_types import ClientFieldData
-from hummingbot.client.ui.interface_utils import format_df_for_printout
-from hummingbot.core.data_type.common import PriceType, TradeType, PositionAction, OrderType
+from hummingbot.core.data_type.common import OrderType, PositionAction, PriceType, TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, ControllerConfigBase
-from hummingbot.strategy_v2.executors.data_types import ConnectorPair
-from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, \
-    TripleBarrierConfig
-from hummingbot.strategy_v2.executors.xemm_executor.data_types import XEMMExecutorConfig
+from hummingbot.strategy_v2.executors.position_executor.data_types import PositionExecutorConfig, TripleBarrierConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
+from pydantic import Field
 
 
 class SpotPerpArbitrageConfig(ControllerConfigBase):
@@ -154,8 +147,10 @@ class SpotPerpArbitrage(ControllerBase):
 
     def create_new_arbitrage_actions(self):
         create_actions = []
-        if not self.processed_data["active_arbitrage"] and self.processed_data["profitability"] > self.config.profitability:
-            mid_price = self.market_data_provider.get_price_by_type(self.config.spot_connector, self.config.spot_trading_pair, PriceType.MidPrice)
+        if not self.processed_data["active_arbitrage"] and \
+                self.processed_data["profitability"] > self.config.profitability:
+            mid_price = self.market_data_provider.get_price_by_type(self.config.spot_connector,
+                                                                    self.config.spot_trading_pair, PriceType.MidPrice)
             create_actions.append(CreateExecutorAction(
                 controller_id=self.config.id,
                 executor_config=PositionExecutorConfig(
@@ -191,6 +186,7 @@ class SpotPerpArbitrage(ControllerBase):
                 stop_actions.append(StopExecutorAction(controller_id=self.config.id, executor_id=executor.id))
 
     def to_format_status(self) -> List[str]:
-        return [f"Current profitability: {self.processed_data['profitability']} | Min profitability: {self.config.profitability}",
-                f"Active arbitrage: {self.processed_data['active_arbitrage']}",
-                f"Current PnL: {self.processed_data['current_pnl']}"]
+        return [
+            f"Current profitability: {self.processed_data['profitability']} | Min profitability: {self.config.profitability}",
+            f"Active arbitrage: {self.processed_data['active_arbitrage']}",
+            f"Current PnL: {self.processed_data['current_pnl']}"]
