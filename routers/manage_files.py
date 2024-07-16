@@ -1,14 +1,14 @@
-from typing import List, Dict
 import json
-from fastapi import APIRouter, HTTPException, UploadFile, File
-from starlette import status
-import yaml
+from typing import Dict, List
 
-from models import ScriptConfig, Script
+import yaml
+from fastapi import APIRouter, File, HTTPException, UploadFile
+from starlette import status
+
+from models import Script, ScriptConfig
 from utils.file_system import FileSystemUtil
 
 router = APIRouter(tags=["Files Management"])
-
 
 file_system = FileSystemUtil()
 
@@ -41,8 +41,10 @@ async def get_script_config(script_name: str):
 
 @router.get("/list-controllers", response_model=dict)
 async def list_controllers():
-    directional_trading_controllers = [file for file in file_system.list_files('controllers/directional_trading') if file != "__init__.py"]
-    market_making_controllers = [file for file in file_system.list_files('controllers/market_making') if file != "__init__.py"]
+    directional_trading_controllers = [file for file in file_system.list_files('controllers/directional_trading') if
+                                       file != "__init__.py"]
+    market_making_controllers = [file for file in file_system.list_files('controllers/market_making') if
+                                 file != "__init__.py"]
     return {"directional_trading": directional_trading_controllers, "market_making": market_making_controllers}
 
 

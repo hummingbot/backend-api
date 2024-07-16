@@ -2,11 +2,12 @@ from typing import Dict, Union
 
 from fastapi import APIRouter
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
-from pydantic import BaseModel
-
 from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
-from hummingbot.strategy_v2.backtesting.controllers_backtesting.directional_trading_backtesting import DirectionalTradingBacktesting
+from hummingbot.strategy_v2.backtesting.controllers_backtesting.directional_trading_backtesting import (
+    DirectionalTradingBacktesting,
+)
 from hummingbot.strategy_v2.backtesting.controllers_backtesting.market_making_backtesting import MarketMakingBacktesting
+from pydantic import BaseModel
 
 from config import CONTROLLERS_MODULE, CONTROLLERS_PATH
 
