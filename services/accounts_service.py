@@ -7,11 +7,10 @@ from decimal import Decimal
 from fastapi import HTTPException
 from hummingbot.client.config.client_config_map import ClientConfigMap
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
-from hummingbot.client.config.config_helpers import ClientConfigAdapter, ReadOnlyClientConfigAdapter, \
-    get_connector_class
+from hummingbot.client.config.config_helpers import ClientConfigAdapter, ReadOnlyClientConfigAdapter, get_connector_class
 from hummingbot.client.settings import AllConnectorSettings
 
-from config import CONFIG_PASSWORD, BANNED_TOKENS
+from config import BANNED_TOKENS, CONFIG_PASSWORD
 from utils.file_system import FileSystemUtil
 from utils.models import BackendAPIConfigAdapter
 from utils.security import BackendAPISecurity
