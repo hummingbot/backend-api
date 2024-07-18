@@ -6,11 +6,11 @@ dependencies:
   - python=3.10
   - fastapi
   - uvicorn
+  - libcxx
   - pip
   - pip:
       - hummingbot
       - numpy==1.26.4
-#      - docker
       - git+https://github.com/felixfontein/docker-py
       - python-dotenv
       - boto3
@@ -18,3 +18,6 @@ dependencies:
       - PyYAML
       - apscheduler
       - git+https://github.com/hummingbot/hbot-remote-client-py.git
+      - flake8
+      - isort
+      - pre-commit

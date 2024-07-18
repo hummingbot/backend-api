@@ -1,13 +1,18 @@
-import os
 from pathlib import Path
 
 from hummingbot.client.config.config_crypt import PASSWORD_VERIFICATION_WORD, BaseSecretsManager
-from hummingbot.client.config.config_helpers import ClientConfigAdapter, update_connector_hb_config, \
-    connector_name_from_file, read_yml_file, get_connector_hb_config, _load_yml_data_into_map
+from hummingbot.client.config.config_helpers import (
+    ClientConfigAdapter,
+    _load_yml_data_into_map,
+    connector_name_from_file,
+    get_connector_hb_config,
+    read_yml_file,
+    update_connector_hb_config,
+)
 from hummingbot.client.config.security import Security
-from utils.file_system import FileSystemUtil
 
 from config import PASSWORD_VERIFICATION_PATH
+from utils.file_system import FileSystemUtil
 from utils.models import BackendAPIConfigAdapter
 
 
@@ -26,7 +31,8 @@ class BackendAPISecurity(Security):
     def decrypt_all(cls, account_name: str = "master_account"):
         cls._secure_configs.clear()
         cls._decryption_done.clear()
-        encrypted_files = [file for file in cls.fs_util.list_files(directory=f"{account_name}/connectors") if file.endswith(".yml")]
+        encrypted_files = [file for file in cls.fs_util.list_files(directory=f"{account_name}/connectors") if
+                           file.endswith(".yml")]
         for file in encrypted_files:
             path = Path(cls.fs_util.base_path + f"/{account_name}/connectors/" + file)
             cls.decrypt_connector_config(path)

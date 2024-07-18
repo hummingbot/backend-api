@@ -1,10 +1,7 @@
 import asyncio
-from datetime import date
 
-import numpy as np
-import pandas as pd
 from fastapi import APIRouter
-from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory, CandlesConfig
+from hummingbot.data_feed.candles_feed.candles_factory import CandlesConfig, CandlesFactory
 from pydantic import BaseModel
 
 router = APIRouter(tags=["Market Data"])

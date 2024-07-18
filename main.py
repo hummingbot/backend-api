@@ -1,7 +1,7 @@
 from dotenv import load_dotenv
 from fastapi import FastAPI
-from routers import manage_docker, manage_broker_messages, manage_files, manage_market_data, manage_backtesting, \
-    manage_accounts
+
+from routers import manage_accounts, manage_backtesting, manage_broker_messages, manage_docker, manage_files, manage_market_data
 
 load_dotenv()
 app = FastAPI()
