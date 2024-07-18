@@ -6,6 +6,7 @@ dependencies:
   - python=3.10
   - fastapi
   - uvicorn
+  - libcxx
   - pip
   - pip:
       - hummingbot
@@ -20,4 +21,3 @@ dependencies:
       - flake8
       - isort
       - pre-commit
-      - libcxx
