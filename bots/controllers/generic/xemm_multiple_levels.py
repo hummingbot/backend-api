@@ -3,8 +3,6 @@ from decimal import Decimal
 from typing import Dict, List, Set
 
 import pandas as pd
-from pydantic import Field, validator
-
 from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.client.ui.interface_utils import format_df_for_printout
 from hummingbot.core.data_type.common import PriceType, TradeType
@@ -13,6 +11,7 @@ from hummingbot.strategy_v2.controllers.controller_base import ControllerBase, C
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.executors.xemm_executor.data_types import XEMMExecutorConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction
+from pydantic import Field, validator
 
 
 class XEMMMultipleLevelsConfig(ControllerConfigBase):
@@ -45,13 +44,15 @@ class XEMMMultipleLevelsConfig(ControllerConfigBase):
     buy_levels_targets_amount: List[List[Decimal]] = Field(
         default="0.003,10-0.006,20-0.009,30",
         client_data=ClientFieldData(
-            prompt=lambda e: "Enter the buy levels targets with the following structure: (target_profitability1,amount1-target_profitability2,amount2): ",
+            prompt=lambda e: "Enter the buy levels targets with the following structure: "
+                             "(target_profitability1,amount1-target_profitability2,amount2): ",
             prompt_on_new=True
         ))
     sell_levels_targets_amount: List[List[Decimal]] = Field(
         default="0.003,10-0.006,20-0.009,30",
         client_data=ClientFieldData(
-            prompt=lambda e: "Enter the sell levels targets with the following structure: (target_profitability1,amount1-target_profitability2,amount2): ",
+            prompt=lambda e: "Enter the sell levels targets with the following structure: "
+                             "(target_profitability1,amount1-target_profitability2,amount2): ",
             prompt_on_new=True
         ))
     min_profitability: Decimal = Field(
@@ -102,7 +103,8 @@ class XEMMMultipleLevels(ControllerBase):
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         executor_actions = []
-        mid_price = self.market_data_provider.get_price_by_type(self.config.maker_connector, self.config.maker_trading_pair, PriceType.MidPrice)
+        mid_price = self.market_data_provider.get_price_by_type(self.config.maker_connector,
+                                                                self.config.maker_trading_pair, PriceType.MidPrice)
         active_buy_executors = self.filter_executors(
             executors=self.executors_info,
             filter_func=lambda e: not e.is_done and e.config.maker_side == TradeType.BUY
@@ -121,7 +123,8 @@ class XEMMMultipleLevels(ControllerBase):
         )
         imbalance = len(stopped_buy_executors) - len(stopped_sell_executors)
         for target_profitability, amount in self.buy_levels_targets_amount:
-            active_buy_executors_target = [e.config.target_profitability == target_profitability for e in active_buy_executors]
+            active_buy_executors_target = [e.config.target_profitability == target_profitability for e in
+                                           active_buy_executors]
 
             if len(active_buy_executors_target) == 0 and imbalance < self.config.max_executors_imbalance:
                 config = XEMMExecutorConfig(
@@ -139,7 +142,8 @@ class XEMMMultipleLevels(ControllerBase):
                 )
                 executor_actions.append(CreateExecutorAction(executor_config=config, controller_id=self.config.id))
         for target_profitability, amount in self.sell_levels_targets_amount:
-            active_sell_executors_target = [e.config.target_profitability == target_profitability for e in active_sell_executors]
+            active_sell_executors_target = [e.config.target_profitability == target_profitability for e in
+                                            active_sell_executors]
             if len(active_sell_executors_target) == 0 and imbalance > -self.config.max_executors_imbalance:
                 config = XEMMExecutorConfig(
                     controller_id=self.config.id,

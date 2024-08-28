@@ -1,4 +1,4 @@
-from typing import Dict, Any
+from typing import Any, Dict
 
 from hummingbot.client.config.config_helpers import ClientConfigAdapter
 from pydantic import SecretStr

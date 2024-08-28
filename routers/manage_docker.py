@@ -1,7 +1,8 @@
+import logging
 import os
 
 from fastapi import APIRouter, HTTPException
-import logging
+
 from models import HummingbotInstanceConfig, ImageName
 from services.bot_archiver import BotArchiver
 from services.docker_service import DockerManager

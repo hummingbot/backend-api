@@ -2,9 +2,14 @@ from typing import Dict, Union
 
 from fastapi import APIRouter
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
+from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
+from hummingbot.strategy_v2.backtesting.controllers_backtesting.directional_trading_backtesting import (
+    DirectionalTradingBacktesting,
+)
+from hummingbot.strategy_v2.backtesting.controllers_backtesting.market_making_backtesting import MarketMakingBacktesting
 from pydantic import BaseModel
 
-from services.backtesting_engine import BacktestingEngine, DirectionalTradingBacktesting, MarketMakingBacktesting
+from config import CONTROLLERS_MODULE, CONTROLLERS_PATH
 
 router = APIRouter(tags=["Market Backtesting"])
 candles_factory = CandlesFactory()
@@ -18,8 +23,8 @@ BACKTESTING_ENGINES = {
 
 
 class BacktestingConfig(BaseModel):
-    start_time: int = 1672542000000  # 2023-01-01 00:00:00
-    end_time: int = 1672628400000  # 2023-01-01 23:59:00
+    start_time: int = 1672542000  # 2023-01-01 00:00:00
+    end_time: int = 1672628400  # 2023-01-01 23:59:00
     backtesting_resolution: str = "1m"
     trade_cost: float = 0.0006
     config: Union[Dict, str]
@@ -29,9 +34,16 @@ class BacktestingConfig(BaseModel):
 async def run_backtesting(backtesting_config: BacktestingConfig):
     try:
         if isinstance(backtesting_config.config, str):
-            controller_config = BacktestingEngine.get_controller_config_instance_from_yml(backtesting_config.config)
+            controller_config = BacktestingEngineBase.get_controller_config_instance_from_yml(
+                config_path=backtesting_config.config,
+                controllers_conf_dir_path=CONTROLLERS_PATH,
+                controllers_module=CONTROLLERS_MODULE
+            )
         else:
-            controller_config = BacktestingEngine.get_controller_config_instance_from_dict(backtesting_config.config)
+            controller_config = BacktestingEngineBase.get_controller_config_instance_from_dict(
+                config_data=backtesting_config.config,
+                controllers_module=CONTROLLERS_MODULE
+            )
         backtesting_engine = BACKTESTING_ENGINES.get(controller_config.controller_type)
         if not backtesting_engine:
             raise ValueError(f"Backtesting engine for controller type {controller_config.controller_type} not found.")

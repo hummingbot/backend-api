@@ -1,10 +1,7 @@
 import asyncio
-from datetime import date
 
-import numpy as np
-import pandas as pd
 from fastapi import APIRouter
-from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory, CandlesConfig
+from hummingbot.data_feed.candles_feed.candles_factory import CandlesConfig, CandlesFactory
 from pydantic import BaseModel
 
 router = APIRouter(tags=["Market Data"])
@@ -15,8 +12,8 @@ class HistoricalCandlesConfig(BaseModel):
     connector_name: str = "binance_perpetual"
     trading_pair: str = "BTC-USDT"
     interval: str = "3m"
-    start_time: int = 1672542000000  # 2023-01-01 00:00:00
-    end_time: int = 1672628400000  # 2023-01-01 23:59:00
+    start_time: int = 1672542000
+    end_time: int = 1672628400
 
 
 @router.post("/real-time-candles")
@@ -43,22 +40,6 @@ async def get_historical_candles(config: HistoricalCandlesConfig):
             interval=config.interval
         )
         candles = candles_factory.get_candle(candles_config)
-        all_candles = []
-        current_start_time = config.start_time
-
-        while current_start_time <= config.end_time:
-            fetched_candles = await candles.fetch_candles(start_time=current_start_time)
-            if fetched_candles.size < 1:
-                break
-
-            all_candles.append(fetched_candles)
-            last_timestamp = fetched_candles[-1][0]  # Assuming the first column is the timestamp
-            current_start_time = int(last_timestamp)
-
-        final_candles = np.concatenate(all_candles, axis=0) if all_candles else np.array([])
-        candles_df = pd.DataFrame(final_candles, columns=candles.columns)
-        candles_df.drop_duplicates(subset=["timestamp"], inplace=True)
-        candles_df["timestamp"] = candles_df["timestamp"] // 1e3
-        return candles_df
+        return await candles.get_historical_candles(config=config)
     except Exception as e:
         return {"error": str(e)}

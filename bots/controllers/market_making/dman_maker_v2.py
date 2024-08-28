@@ -2,8 +2,6 @@ from decimal import Decimal
 from typing import List, Optional
 
 import pandas_ta as ta  # noqa: F401
-from pydantic import Field, validator
-
 from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
@@ -13,6 +11,7 @@ from hummingbot.strategy_v2.controllers.market_making_controller_base import (
 )
 from hummingbot.strategy_v2.executors.dca_executor.data_types import DCAExecutorConfig, DCAMode
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction, StopExecutorAction
+from pydantic import Field, validator
 
 
 class DManMakerV2Config(MarketMakingControllerConfigBase):
@@ -107,7 +106,8 @@ class DManMakerV2(MarketMakingControllerBase):
     def executors_to_refresh(self) -> List[ExecutorAction]:
         executors_to_refresh = self.filter_executors(
             executors=self.executors_info,
-            filter_func=lambda x: not x.is_trading and x.is_active and (self.order_level_refresh_condition(x) or self.first_level_refresh_condition(x)))
+            filter_func=lambda x: not x.is_trading and x.is_active and (
+                        self.order_level_refresh_condition(x) or self.first_level_refresh_condition(x)))
         return [StopExecutorAction(
             controller_id=self.config.id,
             executor_id=executor.id) for executor in executors_to_refresh]

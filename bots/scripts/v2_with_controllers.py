@@ -2,8 +2,6 @@ import os
 import time
 from typing import Dict, List, Optional, Set
 
-from pydantic import Field
-
 from hummingbot.client.hummingbot_application import HummingbotApplication
 from hummingbot.connector.connector_base import ConnectorBase
 from hummingbot.core.clock import Clock
@@ -12,6 +10,7 @@ from hummingbot.remote_iface.mqtt import ETopicPublisher
 from hummingbot.strategy.strategy_v2_base import StrategyV2Base, StrategyV2ConfigBase
 from hummingbot.strategy_v2.models.base import RunnableStatus
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, StopExecutorAction
+from pydantic import Field
 
 
 class GenericV2StrategyWithCashOutConfig(StrategyV2ConfigBase):
@@ -32,6 +31,7 @@ class GenericV2StrategyWithCashOut(StrategyV2Base):
     specific controller and wait until the active executors finalize their execution. The rest of the executors will
     wait until the main strategy stops them.
     """
+
     def __init__(self, connectors: Dict[str, ConnectorBase], config: GenericV2StrategyWithCashOutConfig):
         super().__init__(connectors, config)
         self.config = config
@@ -69,8 +69,10 @@ class GenericV2StrategyWithCashOut(StrategyV2Base):
         self.send_performance_report()
 
     def send_performance_report(self):
-        if self.current_timestamp - self._last_performance_report_timestamp >= self.performance_report_interval and self.mqtt_enabled:
-            performance_reports = {controller_id: self.executor_orchestrator.generate_performance_report(controller_id=controller_id).dict() for controller_id in self.controllers.keys()}
+        if self.current_timestamp - self._last_performance_report_timestamp >= self.performance_report_interval \
+                and self.mqtt_enabled:
+            performance_reports = {controller_id: self.executor_orchestrator.generate_performance_report(
+                controller_id=controller_id).dict() for controller_id in self.controllers.keys()}
             self._pub(performance_reports)
             self._last_performance_report_timestamp = self.current_timestamp
 
@@ -136,6 +138,7 @@ class GenericV2StrategyWithCashOut(StrategyV2Base):
                         connectors_position_mode[config_dict["connector_name"]] = config_dict["position_mode"]
                     if "leverage" in config_dict:
                         self.connectors[config_dict["connector_name"]].set_leverage(leverage=config_dict["leverage"],
-                                                                                    trading_pair=config_dict["trading_pair"])
+                                                                                    trading_pair=config_dict[
+                                                                                        "trading_pair"])
         for connector_name, position_mode in connectors_position_mode.items():
             self.connectors[connector_name].set_position_mode(position_mode)

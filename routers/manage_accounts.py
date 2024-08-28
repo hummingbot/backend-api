@@ -1,6 +1,6 @@
-from typing import List, Dict
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from typing import Dict, List
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import APIRouter, HTTPException
 from hummingbot.client.settings import AllConnectorSettings
 from starlette import status
