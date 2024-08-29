@@ -140,7 +140,7 @@ class BotsManager:
             except Exception as e:
                 cleaned_performance[controller] = {
                     "status": "error",
-                    "error": f"Some metrics are not numeric, check logs and restart controller. {e}",
+                    "error": f"Some metrics are not numeric, check logs and restart controller: {e}",
                 }
         return cleaned_performance
 
