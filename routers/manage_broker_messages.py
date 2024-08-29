@@ -20,7 +20,6 @@ def update_active_bots():
 async def startup_event():
     # Add the job to the scheduler
     scheduler.add_job(update_active_bots, 'interval', seconds=10)
-    scheduler.start()
 
 
 @router.on_event("shutdown")
