@@ -17,6 +17,11 @@ async def startup_event():
     accounts_service.start_update_account_state_loop()
 
 
+@router.on_event("shutdown")
+async def shutdown_event():
+    accounts_service.stop_update_account_state_loop()
+
+
 @router.get("/accounts-state", response_model=Dict[str, Dict[str, List[Dict]]])
 async def get_all_accounts_state():
     return accounts_service.get_accounts_state()
