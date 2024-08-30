@@ -79,29 +79,30 @@ class BotsManager:
             self._update_bots_task.cancel()
         self._update_bots_task = None
 
-    async def update_active_bots(self, sleep_time=10):
-        active_hbot_containers = self.get_active_containers()
-        # Remove bots that are no longer active
-        for bot in list(self.active_bots):
-            if bot not in active_hbot_containers:
-                del self.active_bots[bot]
+    async def update_active_bots(self, sleep_time=1):
+        while True:
+            active_hbot_containers = self.get_active_containers()
+            # Remove bots that are no longer active
+            for bot in list(self.active_bots):
+                if bot not in active_hbot_containers:
+                    del self.active_bots[bot]
 
-        # Add new bots or update existing ones
-        for bot in active_hbot_containers:
-            if bot not in self.active_bots:
-                hbot_listener = HummingbotPerformanceListener(host=self.broker_host, port=self.broker_port,
-                                                              username=self.broker_username,
-                                                              password=self.broker_password,
-                                                              bot_id=bot)
-                hbot_listener.start()
-                self.active_bots[bot] = {
-                    "bot_name": bot,
-                    "broker_client": BotCommands(host=self.broker_host, port=self.broker_port,
-                                                 username=self.broker_username, password=self.broker_password,
-                                                 bot_id=bot),
-                    "broker_listener": hbot_listener,
-                }
-        await asyncio.sleep(sleep_time)
+            # Add new bots or update existing ones
+            for bot in active_hbot_containers:
+                if bot not in self.active_bots:
+                    hbot_listener = HummingbotPerformanceListener(host=self.broker_host, port=self.broker_port,
+                                                                  username=self.broker_username,
+                                                                  password=self.broker_password,
+                                                                  bot_id=bot)
+                    hbot_listener.start()
+                    self.active_bots[bot] = {
+                        "bot_name": bot,
+                        "broker_client": BotCommands(host=self.broker_host, port=self.broker_port,
+                                                     username=self.broker_username, password=self.broker_password,
+                                                     bot_id=bot),
+                        "broker_listener": hbot_listener,
+                    }
+            await asyncio.sleep(sleep_time)
 
     # Interact with a specific bot
     def start_bot(self, bot_name, **kwargs):
