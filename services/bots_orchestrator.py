@@ -1,11 +1,11 @@
-import logging
+import asyncio
 from collections import deque
+from typing import Optional
 
 import docker
 from hbotrc import BotCommands
 from hbotrc.listener import BotListener
 from hbotrc.spec import TopicSpecs
-from hummingbot.connector.connector_base import Decimal
 
 
 class HummingbotPerformanceListener(BotListener):
@@ -58,6 +58,7 @@ class BotsManager:
         self.broker_password = broker_password
         self.docker_client = docker.from_env()
         self.active_bots = {}
+        self._update_bots_task: Optional[asyncio.Task] = None
 
     @staticmethod
     def hummingbot_containers_fiter(container):
@@ -70,28 +71,38 @@ class BotsManager:
         return [container.name for container in self.docker_client.containers.list()
                 if container.status == 'running' and self.hummingbot_containers_fiter(container)]
 
-    def update_active_bots(self):
-        active_hbot_containers = self.get_active_containers()
-        # Remove bots that are no longer active
-        for bot in list(self.active_bots):
-            if bot not in active_hbot_containers:
-                del self.active_bots[bot]
+    def start_update_active_bots_loop(self):
+        self._update_bots_task = asyncio.create_task(self.update_active_bots())
 
-        # Add new bots or update existing ones
-        for bot in active_hbot_containers:
-            if bot not in self.active_bots:
-                hbot_listener = HummingbotPerformanceListener(host=self.broker_host, port=self.broker_port,
-                                                              username=self.broker_username,
-                                                              password=self.broker_password,
-                                                              bot_id=bot)
-                hbot_listener.start()
-                self.active_bots[bot] = {
-                    "bot_name": bot,
-                    "broker_client": BotCommands(host=self.broker_host, port=self.broker_port,
-                                                 username=self.broker_username, password=self.broker_password,
-                                                 bot_id=bot),
-                    "broker_listener": hbot_listener,
-                }
+    def stop_update_active_bots_loop(self):
+        if self._update_bots_task:
+            self._update_bots_task.cancel()
+        self._update_bots_task = None
+
+    async def update_active_bots(self, sleep_time=1):
+        while True:
+            active_hbot_containers = self.get_active_containers()
+            # Remove bots that are no longer active
+            for bot in list(self.active_bots):
+                if bot not in active_hbot_containers:
+                    del self.active_bots[bot]
+
+            # Add new bots or update existing ones
+            for bot in active_hbot_containers:
+                if bot not in self.active_bots:
+                    hbot_listener = HummingbotPerformanceListener(host=self.broker_host, port=self.broker_port,
+                                                                  username=self.broker_username,
+                                                                  password=self.broker_password,
+                                                                  bot_id=bot)
+                    hbot_listener.start()
+                    self.active_bots[bot] = {
+                        "bot_name": bot,
+                        "broker_client": BotCommands(host=self.broker_host, port=self.broker_port,
+                                                     username=self.broker_username, password=self.broker_password,
+                                                     bot_id=bot),
+                        "broker_listener": hbot_listener,
+                    }
+            await asyncio.sleep(sleep_time)
 
     # Interact with a specific bot
     def start_bot(self, bot_name, **kwargs):
@@ -103,7 +114,6 @@ class BotsManager:
         if bot_name in self.active_bots:
             self.active_bots[bot_name]["broker_listener"].stop()
             return self.active_bots[bot_name]["broker_client"].stop(**kwargs)
-
 
     def import_strategy_for_bot(self, bot_name, strategy, **kwargs):
         if bot_name in self.active_bots:
@@ -131,7 +141,7 @@ class BotsManager:
             except Exception as e:
                 cleaned_performance[controller] = {
                     "status": "error",
-                    "error": "Some metrics are not numeric, check logs and restart controller",
+                    "error": f"Some metrics are not numeric, check logs and restart controller: {e}",
                 }
         return cleaned_performance
 

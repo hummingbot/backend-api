@@ -1,4 +1,3 @@
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import APIRouter, HTTPException
 
 from config import BROKER_HOST, BROKER_PASSWORD, BROKER_PORT, BROKER_USERNAME
@@ -6,26 +5,20 @@ from models import ImportStrategyAction, StartBotAction, StopBotAction
 from services.bots_orchestrator import BotsManager
 
 # Initialize the scheduler
-scheduler = AsyncIOScheduler()
 router = APIRouter(tags=["Manage Broker Messages"])
 bots_manager = BotsManager(broker_host=BROKER_HOST, broker_port=BROKER_PORT, broker_username=BROKER_USERNAME,
                            broker_password=BROKER_PASSWORD)
 
 
-def update_active_bots():
-    bots_manager.update_active_bots()
-
-
 @router.on_event("startup")
 async def startup_event():
-    # Add the job to the scheduler
-    scheduler.add_job(update_active_bots, 'interval', seconds=10)
+    bots_manager.start_update_active_bots_loop()
 
 
 @router.on_event("shutdown")
 async def shutdown_event():
     # Shutdown the scheduler on application exit
-    scheduler.shutdown()
+    bots_manager.stop_update_active_bots_loop()
 
 
 @router.get("/get-active-bots-status")

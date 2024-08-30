@@ -16,7 +16,6 @@ dependencies:
       - boto3
       - python-multipart
       - PyYAML
-      - apscheduler
       - git+https://github.com/hummingbot/hbot-remote-client-py.git
       - flake8
       - isort
