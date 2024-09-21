@@ -30,8 +30,9 @@ class HummingbotDatabase:
         orders_status = self._get_table_status(self.get_orders)
         order_status_status = self._get_table_status(self.get_order_status)
         executors_status = self._get_table_status(self.get_executors_data)
+        controller_status = self._get_table_status(self.get_controllers_data)
         general_status = all(status == "Correct" for status in
-                             [trade_fill_status, orders_status, order_status_status, executors_status])
+                             [trade_fill_status, orders_status, order_status_status, executors_status, controller_status])
         status = {"db_name": self.db_name,
                   "db_path": self.db_path,
                   "trade_fill": trade_fill_status,
@@ -76,6 +77,12 @@ class HummingbotDatabase:
             query = "SELECT * FROM Executors"
             executors = pd.read_sql_query(text(query), session.connection())
         return executors
+
+    def get_controllers_data(self) -> pd.DataFrame:
+        with self.session_maker() as session:
+            query = "SELECT * FROM Controllers"
+            controllers = pd.read_sql_query(text(query), session.connection())
+        return controllers
 
 
 class ETLPerformance:
@@ -152,8 +159,19 @@ class ETLPerformance:
         )
 
     @property
+    def controllers_table(self):
+        return Table(
+            'controllers', MetaData(),
+            Column('id', VARCHAR(255)),
+            Column('controller_id', INT),
+            Column('timestamp', FLOAT),
+            Column('type', VARCHAR(255)),
+            Column('config', String),
+        )
+
+    @property
     def tables(self):
-        return [self.executors_table, self.trade_fill_table, self.orders_table]
+        return [self.executors_table, self.trade_fill_table, self.orders_table, self.controllers_table]
 
     def create_tables(self):
         with self.engine.connect():
@@ -167,6 +185,8 @@ class ETLPerformance:
             self.insert_trade_fill(data["trade_fill"])
         if "orders" in data:
             self.insert_orders(data["orders"])
+        if "controllers" in data:
+            self.insert_controllers(data["controllers"])
 
     def insert_executors(self, executors):
         with self.engine.connect() as conn:
@@ -235,6 +255,19 @@ class ETLPerformance:
                     last_update_timestamp=row["last_update_timestamp"],
                     exchange_order_id=row["exchange_order_id"],
                     position=row["position"],
+                )
+                conn.execute(ins)
+                conn.commit()
+
+    def insert_controllers(self, controllers):
+        with self.engine.connect() as conn:
+            for _, row in controllers.iterrows():
+                ins = insert(self.controllers_table).values(
+                    id=row["id"],
+                    controller_id=row["controller_id"],
+                    timestamp=row["timestamp"],
+                    type=row["type"],
+                    config=row["config"],
                 )
                 conn.execute(ins)
                 conn.commit()
