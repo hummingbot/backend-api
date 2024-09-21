@@ -88,10 +88,12 @@ async def load_checkpoint(checkpoint_path: str):
         executor = etl.load_executors()
         order = etl.load_orders()
         trade_fill = etl.load_trade_fill()
+        controllers = etl.load_controllers()
         checkpoint_data = {
-            "executor": json.dumps(executor.to_dict()),
-            "order": json.dumps(order.to_dict()),
+            "executors": json.dumps(executor.to_dict()),
+            "orders": json.dumps(order.to_dict()),
             "trade_fill": json.dumps(trade_fill.to_dict()),
+            "controllers": json.dumps(controllers.to_dict())
         }
         return checkpoint_data
     except Exception as e:

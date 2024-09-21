@@ -290,6 +290,12 @@ class ETLPerformance:
             orders = pd.read_sql_query(text(query), session.connection())
             return orders
 
+    def load_controllers(self):
+        with self.session_maker() as session:
+            query = "SELECT * FROM controllers"
+            controllers = pd.read_sql_query(text(query), session.connection())
+            return controllers
+
     @staticmethod
     def parse_executors(executors: pd.DataFrame) -> List[ExecutorInfo]:
         executor_values = []
