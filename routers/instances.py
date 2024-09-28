@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 from typing import List
 
 from config import BROKER_HOST, BROKER_PASSWORD, BROKER_PORT, BROKER_USERNAME
-from models import HummingbotInstanceConfig, Instance, InstanceStats, Strategy, BacktestRequest, BacktestResult, StartStrategyRequest, InstanceResponse
+from utils.models import HummingbotInstanceConfig, Instance, InstanceStats, Strategy, BacktestRequest, BacktestResult, StartStrategyRequest, InstanceResponse
 from services.docker_service import DockerManager
 from services.bots_orchestrator import BotsManager
 
@@ -60,6 +60,7 @@ async def get_instance_stats(instance_id: str):
 async def get_strategies():
     # This is a placeholder. You need to implement a way to get all available strategies and their configurations.
     return [
+        # TODO: Add pure market making
         Strategy(
             name="simple_market_making",
             parameters={"bid_spread": "float", "ask_spread": "float"},
@@ -74,6 +75,11 @@ async def backtest_strategy(backtest_request: BacktestRequest):
     # This is a placeholder. You need to implement the actual backtesting logic.
     return BacktestResult(pnl=Decimal("100.0"))
 
+@router.post("/instance", response_model=StartStrategyRequest)
+async def create_instance():
+    #TODO: Return wallet address of bot
+    return StartStrategyRequest(strategy_name="simple_market_making", parameters={"bid_spread": "float", "ask_spread": "float"})
+
 @router.put("/instance/{instance_id}/start")
 async def start_instance(instance_id: str, start_request: StartStrategyRequest):
     response = bots_manager.start_bot(instance_id, script=start_request.strategy_name, conf=start_request.parameters)
@@ -87,3 +93,5 @@ async def stop_instance(instance_id: str):
     if not response:
         raise HTTPException(status_code=500, detail="Failed to stop the instance")
     return {"status": "success", "message": "Instance stopped successfully"}
+
+from hummingbot.strategy.pure_market_making.pure_market_making_config_map import pure_market_making_config_map
