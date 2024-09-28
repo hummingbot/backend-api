@@ -1,6 +1,7 @@
 from typing import Dict, Union
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
+from fastapi_walletauth import JWTWalletAuthDep
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
 from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
 from hummingbot.strategy_v2.backtesting.controllers_backtesting.directional_trading_backtesting import (
@@ -31,7 +32,7 @@ class BacktestingConfig(BaseModel):
 
 
 @router.post("/run-backtesting")
-async def run_backtesting(backtesting_config: BacktestingConfig):
+async def run_backtesting(backtesting_config: BacktestingConfig, wa: JWTWalletAuthDep):
     try:
         if isinstance(backtesting_config.config, str):
             controller_config = BacktestingEngineBase.get_controller_config_instance_from_yml(

@@ -1,6 +1,7 @@
 import asyncio
 
 from fastapi import APIRouter
+from fastapi_walletauth import JWTWalletAuthDep
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesConfig, CandlesFactory
 from pydantic import BaseModel
 
@@ -17,7 +18,7 @@ class HistoricalCandlesConfig(BaseModel):
 
 
 @router.post("/real-time-candles")
-async def get_candles(candles_config: CandlesConfig):
+async def get_candles(candles_config: CandlesConfig, wa: JWTWalletAuthDep):
     try:
         candles = candles_factory.get_candle(candles_config)
         candles.start()
@@ -32,7 +33,7 @@ async def get_candles(candles_config: CandlesConfig):
 
 
 @router.post("/historical-candles")
-async def get_historical_candles(config: HistoricalCandlesConfig):
+async def get_historical_candles(config: HistoricalCandlesConfig, wa: JWTWalletAuthDep):
     try:
         candles_config = CandlesConfig(
             connector=config.connector_name,

@@ -1,4 +1,5 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
+from fastapi_walletauth import JWTWalletAuthDep
 
 from config import BROKER_HOST, BROKER_PASSWORD, BROKER_PORT, BROKER_USERNAME
 from models import ImportStrategyAction, StartBotAction, StopBotAction
@@ -22,13 +23,13 @@ async def shutdown_event():
 
 
 @router.get("/get-active-bots-status")
-def get_active_bots_status():
+def get_active_bots_status(wa: JWTWalletAuthDep):
     """Returns the cached status of all active bots."""
     return {"status": "success", "data": bots_manager.get_all_bots_status()}
 
 
 @router.get("/get-bot-status/{bot_name}")
-def get_bot_status(bot_name: str):
+def get_bot_status(bot_name: str, wa: JWTWalletAuthDep):
     response = bots_manager.get_bot_status(bot_name)
     if not response:
         raise HTTPException(status_code=404, detail="Bot not found")
@@ -39,26 +40,26 @@ def get_bot_status(bot_name: str):
 
 
 @router.get("/get-bot-history/{bot_name}")
-def get_bot_history(bot_name: str):
+def get_bot_history(bot_name: str, wa: JWTWalletAuthDep):
     response = bots_manager.get_bot_history(bot_name)
     return {"status": "success", "response": response}
 
 
 @router.post("/start-bot")
-def start_bot(action: StartBotAction):
+def start_bot(action: StartBotAction, wa: JWTWalletAuthDep):
     response = bots_manager.start_bot(action.bot_name, log_level=action.log_level, script=action.script,
                                       conf=action.conf, async_backend=action.async_backend)
     return {"status": "success", "response": response}
 
 
 @router.post("/stop-bot")
-def stop_bot(action: StopBotAction):
+def stop_bot(action: StopBotAction, wa: JWTWalletAuthDep):
     response = bots_manager.stop_bot(action.bot_name, skip_order_cancellation=action.skip_order_cancellation,
                                      async_backend=action.async_backend)
     return {"status": "success", "response": response}
 
 
 @router.post("/import-strategy")
-def import_strategy(action: ImportStrategyAction):
+def import_strategy(action: ImportStrategyAction, wa: JWTWalletAuthDep):
     response = bots_manager.import_strategy_for_bot(action.bot_name, action.strategy)
     return {"status": "success", "response": response}
