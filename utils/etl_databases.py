@@ -1,8 +1,11 @@
 import os
 import pandas as pd
 import json
-from typing import List
+from typing import List, Dict, Any
 
+from hummingbot.connector.connector_base import TradeType
+from hummingbot.strategy_v2.models.base import RunnableStatus
+from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 from sqlalchemy import create_engine, insert, text, MetaData, Table, Column, VARCHAR, INT, FLOAT,  Integer, String, Float
 from sqlalchemy.orm import sessionmaker
@@ -276,7 +279,7 @@ class ETLPerformance:
         with self.session_maker() as session:
             query = "SELECT * FROM executors"
             executors = pd.read_sql_query(text(query), session.connection())
-            return executors
+        return executors
 
     def load_trade_fill(self):
         with self.session_maker() as session:
@@ -296,68 +299,60 @@ class ETLPerformance:
             controllers = pd.read_sql_query(text(query), session.connection())
             return controllers
 
-    @staticmethod
-    def parse_executors(executors: pd.DataFrame) -> List[ExecutorInfo]:
-        executor_values = []
-        for _, row in executors.iterrows():
-            executor_values.append(ExecutorInfo(
-                id=row["id"],
-                timestamp=row["timestamp"],
-                type=row["type"],
-                close_timestamp=row["close_timestamp"],
-                close_type=row["close_type"],
-                status=row["status"],
-                config=json.loads(row["config"]),
-                net_pnl_pct=row["net_pnl_pct"],
-                net_pnl_quote=row["net_pnl_quote"],
-                cum_fees_quote=row["cum_fees_quote"],
-                filled_amount_quote=row["filled_amount_quote"],
-                is_active=row["is_active"],
-                is_trading=row["is_trading"],
-                custom_info=json.loads(row["custom_info"]),
-                controller_id=row["controller_id"],
-                side=row["side"],
-            ))
+
+class PerformanceDataSource:
+    def __init__(self, executors_dict: Dict[str, Any]):
+        self.executors_dict = executors_dict
+
+    @property
+    def executors_df(self):
+        executors = pd.DataFrame(self.executors_dict)
+        executors["custom_info"] = executors["custom_info"].apply(
+            lambda x: json.loads(x) if isinstance(x, str) else x)
+        executors["config"] = executors["config"].apply(lambda x: json.loads(x) if isinstance(x, str) else x)
+        executors["timestamp"] = executors["timestamp"].apply(lambda x: self.ensure_timestamp_in_seconds(x))
+        executors["close_timestamp"] = executors["close_timestamp"].apply(
+            lambda x: self.ensure_timestamp_in_seconds(x))
+        executors["trading_pair"] = executors["config"].apply(lambda x: x["trading_pair"])
+        executors["exchange"] = executors["config"].apply(lambda x: x["connector_name"])
+        executors["level_id"] = executors["config"].apply(
+            lambda x: x.get("level_id") if x.get("level_id") is not None else 0)
+        executors["bep"] = executors["custom_info"].apply(lambda x: x["current_position_average_price"])
+        executors["order_ids"] = executors["custom_info"].apply(lambda x: x.get("order_ids"))
+        executors["close_price"] = executors["custom_info"].apply(lambda x: x["close_price"])
+        executors["sl"] = executors["config"].apply(lambda x: x["stop_loss"]).fillna(0)
+        executors["tp"] = executors["config"].apply(lambda x: x["take_profit"]).fillna(0)
+        executors["tl"] = executors["config"].apply(lambda x: x["time_limit"]).fillna(0)
+        return executors
+
+    @property
+    def executor_info_list(self) -> List[ExecutorInfo]:
+        executors = self.apply_special_data_types(self.executors_df)
+        required_columns = [
+            "id", "timestamp", "type", "close_timestamp", "close_type", "status",
+            "net_pnl_pct", "net_pnl_quote", "cum_fees_quote", "filled_amount_quote",
+            "is_active", "is_trading", "controller_id", "side", "config", "custom_info"
+        ]
+        filtered_df = executors[required_columns]
+        executor_values = filtered_df.apply(lambda row: ExecutorInfo(**row.to_dict()), axis=1).tolist()
         return executor_values
 
-    @staticmethod
-    def dump_executors(executors: List[ExecutorInfo]) -> List[dict]:
-        executor_values = []
-        for executor in executors:
-            executor_to_append = {
-                "id": executor.id,
-                "timestamp": executor.timestamp,
-                "type": executor.type,
-                "close_timestamp": executor.close_timestamp,
-                "close_type": executor.close_type.value,
-                "status": executor.status.value,
-                "config": executor.config.dict(),
-                "net_pnl_pct": executor.net_pnl_pct,
-                "net_pnl_quote": executor.net_pnl_quote,
-                "cum_fees_quote": executor.cum_fees_quote,
-                "filled_amount_quote": executor.filled_amount_quote,
-                "is_active": executor.is_active,
-                "is_trading": executor.is_trading,
-                "custom_info": json.dumps(executor.custom_info),
-                "controller_id": executor.controller_id,
-                "side": executor.side,
-            }
-            executor_to_append["config"]["mode"] = executor_to_append["config"]["mode"].value
-            executor_to_append["config"]["side"] = executor_to_append["config"]["side"].value
-            executor_values.append(executor_to_append)
-        return executor_values
+    def apply_special_data_types(self, executors):
+        executors["status"] = executors["status"].apply(lambda x: self.get_enum_by_value(RunnableStatus, int(x)))
+        executors["side"] = executors["config"].apply(lambda x: self.get_enum_by_value(TradeType, int(x["side"])))
+        executors["close_type"] = executors["close_type"].apply(lambda x: self.get_enum_by_value(CloseType, int(x)))
+        executors["close_type_name"] = executors["close_type"].apply(lambda x: x.name)
+        executors["datetime"] = pd.to_datetime(executors.timestamp, unit="s")
+        executors["close_datetime"] = pd.to_datetime(executors["close_timestamp"], unit="s")
+        return executors
 
     @staticmethod
-    def get_executors_with_orders(executors, orders):
-        df = pd.DataFrame(executors['custom_info'].tolist(), index=executors['id'],
-                          columns=["custom_info"]).reset_index()
-        df["custom_info"] = df["custom_info"].apply(lambda x: json.loads(x))
-        df["orders"] = df["custom_info"].apply(lambda x: x["order_ids"])
-        df.rename(columns={"id": "executor_id"}, inplace=True)
-        exploded_df = df.explode("orders").rename(columns={"orders": "order_id"})
-        exec_with_orders = exploded_df.merge(orders, left_on="order_id", right_on="client_order_id", how="inner")
-        exec_with_orders = exec_with_orders[exec_with_orders["last_status"].isin(["SellOrderCompleted", "BuyOrderCompleted"])]
-        return exec_with_orders[["executor_id", "order_id", "last_status", "last_update_timestamp", "price", "amount", "position"]]
+    def remove_special_data_types(executors):
+        executors["status"] = executors["status"].apply(lambda x: x.value)
+        executors["side"] = executors["side"].apply(lambda x: x.value)
+        executors["close_type"] = executors["close_type"].apply(lambda x: x.value)
+        executors.drop(columns=["close_type_name", "datetime", "close_datetime"], inplace=True)
+        return executors
 
     @staticmethod
     def get_enum_by_value(enum_class, value):
