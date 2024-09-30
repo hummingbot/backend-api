@@ -3,11 +3,12 @@ import os
 import shutil
 
 import docker
-from docker.errors import DockerException
+from docker.errors import DockerException, APIError
 from docker.types import LogConfig
 
-from models import HummingbotInstanceConfig
+from typing import List, Optional
 from utils.file_system import FileSystemUtil
+from utils.models import HummingbotInstanceConfig  # Add this import
 
 file_system = FileSystemUtil()
 

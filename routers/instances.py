@@ -7,15 +7,17 @@ from config import BROKER_HOST, BROKER_PASSWORD, BROKER_PORT, BROKER_USERNAME
 from utils.models import HummingbotInstanceConfig, Instance, InstanceStats, Strategy, BacktestRequest, BacktestResult, StartStrategyRequest, InstanceResponse
 from services.docker_service import DockerManager
 from services.bots_orchestrator import BotsManager
+from fastapi_walletauth import JWTWalletAuthDep, jwt_authorization_router
 
 router = APIRouter(tags=["Instance Management"])
+router.include_router(jwt_authorization_router)
 
 docker_manager = DockerManager()
 bots_manager = BotsManager(broker_host=BROKER_HOST, broker_port=BROKER_PORT, 
                            broker_username=BROKER_USERNAME, broker_password=BROKER_PASSWORD)
 
 @router.post("/instances", response_model=InstanceResponse)
-async def create_instance():
+async def create_instance(wallet_auth: JWTWalletAuthDep):
     # Create a new Hummingbot instance
     instance_config = HummingbotInstanceConfig(
         instance_name=f"instance_{uuid.uuid4().hex[:8]}",
@@ -45,7 +47,7 @@ async def get_instances():
     return instances
 
 @router.get("/instance/{instance_id}/stats", response_model=InstanceStats)
-async def get_instance_stats(instance_id: str):
+async def get_instance_stats(instance_id: str, wallet_auth: JWTWalletAuthDep):
     status = bots_manager.get_bot_status(instance_id)
     if status["status"] == "error":
         raise HTTPException(status_code=404, detail="Instance not found")
@@ -57,7 +59,7 @@ async def get_instance_stats(instance_id: str):
     return InstanceStats(pnl=pnl)
 
 @router.get("/strategies", response_model=List[Strategy])
-async def get_strategies():
+async def get_strategies(wallet_auth: JWTWalletAuthDep):
     # This is a placeholder. You need to implement a way to get all available strategies and their configurations.
     return [
         # TODO: Add pure market making
@@ -71,27 +73,27 @@ async def get_strategies():
     ]
 
 @router.post("/strategies/backtest", response_model=BacktestResult)
-async def backtest_strategy(backtest_request: BacktestRequest):
+async def backtest_strategy(backtest_request: BacktestRequest, wallet_auth: JWTWalletAuthDep):
     # This is a placeholder. You need to implement the actual backtesting logic.
     return BacktestResult(pnl=Decimal("100.0"))
 
 @router.post("/instance", response_model=StartStrategyRequest)
-async def create_instance():
+async def create_instance(wallet_auth: JWTWalletAuthDep):
     #TODO: Return wallet address of bot
     return StartStrategyRequest(strategy_name="simple_market_making", parameters={"bid_spread": "float", "ask_spread": "float"})
 
 @router.put("/instance/{instance_id}/start")
-async def start_instance(instance_id: str, start_request: StartStrategyRequest):
+async def start_instance(instance_id: str, start_request: StartStrategyRequest, wallet_auth: JWTWalletAuthDep):
     response = bots_manager.start_bot(instance_id, script=start_request.strategy_name, conf=start_request.parameters)
     if not response:
         raise HTTPException(status_code=500, detail="Failed to start the instance")
     return {"status": "success", "message": "Instance started successfully"}
 
 @router.post("/strategies/{instance_id}/stop")
-async def stop_instance(instance_id: str):
+async def stop_instance(instance_id: str, wallet_auth: JWTWalletAuthDep):
     response = bots_manager.stop_bot(instance_id)
     if not response:
         raise HTTPException(status_code=500, detail="Failed to stop the instance")
     return {"status": "success", "message": "Instance stopped successfully"}
 
-from hummingbot.strategy.pure_market_making.pure_market_making_config_map import pure_market_making_config_map
+# from hummingbot.strategy.pure_market_making.pure_market_making_config_map import pure_market_making_config_map
