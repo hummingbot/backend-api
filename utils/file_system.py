@@ -193,6 +193,7 @@ class FileSystemUtil:
     def get_connector_keys_path(account_name: str, connector_name: str) -> Path:
         return Path(f"bots/credentials/{account_name}/connectors/{connector_name}.yml")
 
+    @staticmethod
     def save_model_to_yml(yml_path: Path, cm: ClientConfigAdapter):
         try:
             cm_yml_str = cm.generate_yml_output_str_with_comments()
@@ -200,3 +201,24 @@ class FileSystemUtil:
                 outfile.write(cm_yml_str)
         except Exception as e:
             logging.error("Error writing configs: %s" % (str(e),), exc_info=True)
+
+    def list_databases(self):
+        archived_path = os.path.join(self.base_path, "archived")
+        archived_instances = self.list_folders("archived")
+        archived_databases = []
+        for archived_instance in archived_instances:
+            db_path = os.path.join(archived_path, archived_instance, "data")
+            archived_databases += [os.path.join(db_path, db_file) for db_file in os.listdir(db_path)
+                                   if db_file.endswith(".sqlite")]
+        return archived_databases
+
+    def list_checkpoints(self, full_path: bool):
+        dir_path = os.path.join(self.base_path, "data")
+        if full_path:
+            checkpoints = [os.path.join(dir_path, f) for f in os.listdir(dir_path) if
+                           os.path.isfile(os.path.join(dir_path, f))
+                           and f.startswith("checkpoint") and f.endswith(".sqlite")]
+        else:
+            checkpoints = [f for f in os.listdir(dir_path) if os.path.isfile(os.path.join(dir_path, f))
+                           and f.startswith("checkpoint") and f.endswith(".sqlite")]
+        return checkpoints
