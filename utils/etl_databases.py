@@ -3,7 +3,7 @@ import pandas as pd
 import json
 from typing import List, Dict, Any
 
-from hummingbot.connector.connector_base import TradeType
+from hummingbot.core.data_type.common import TradeType
 from hummingbot.strategy_v2.models.base import RunnableStatus
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
@@ -315,8 +315,7 @@ class PerformanceDataSource:
             lambda x: self.ensure_timestamp_in_seconds(x))
         executors["trading_pair"] = executors["config"].apply(lambda x: x["trading_pair"])
         executors["exchange"] = executors["config"].apply(lambda x: x["connector_name"])
-        executors["level_id"] = executors["config"].apply(
-            lambda x: x.get("level_id") if x.get("level_id") is not None else 0)
+        executors["level_id"] = executors["config"].apply(lambda x: x.get("level_id"))
         executors["bep"] = executors["custom_info"].apply(lambda x: x["current_position_average_price"])
         executors["order_ids"] = executors["custom_info"].apply(lambda x: x.get("order_ids"))
         executors["close_price"] = executors["custom_info"].apply(lambda x: x["close_price"])
@@ -328,13 +327,27 @@ class PerformanceDataSource:
     @property
     def executor_info_list(self) -> List[ExecutorInfo]:
         executors = self.apply_special_data_types(self.executors_df)
-        required_columns = [
-            "id", "timestamp", "type", "close_timestamp", "close_type", "status",
-            "net_pnl_pct", "net_pnl_quote", "cum_fees_quote", "filled_amount_quote",
-            "is_active", "is_trading", "controller_id", "side", "config", "custom_info"
-        ]
-        filtered_df = executors[required_columns]
-        executor_values = filtered_df.apply(lambda row: ExecutorInfo(**row.to_dict()), axis=1).tolist()
+        executor_values = []
+        for index, row in executors.iterrows():
+            executor_to_append = ExecutorInfo(
+                id=row["id"],
+                timestamp=row["timestamp"],
+                type=row["type"],
+                close_timestamp=row["close_timestamp"],
+                close_type=row["close_type"],
+                status=row["status"],
+                config=row["config"],
+                net_pnl_pct=row["net_pnl_pct"],
+                net_pnl_quote=row["net_pnl_quote"],
+                cum_fees_quote=row["cum_fees_quote"],
+                filled_amount_quote=row["filled_amount_quote"],
+                is_active=row["is_active"],
+                is_trading=row["is_trading"],
+                custom_info=row["custom_info"],
+                controller_id=row["controller_id"]
+            )
+            executor_to_append.custom_info["side"] = row["side"]
+            executor_values.append(executor_to_append)
         return executor_values
 
     def apply_special_data_types(self, executors):
@@ -344,14 +357,6 @@ class PerformanceDataSource:
         executors["close_type_name"] = executors["close_type"].apply(lambda x: x.name)
         executors["datetime"] = pd.to_datetime(executors.timestamp, unit="s")
         executors["close_datetime"] = pd.to_datetime(executors["close_timestamp"], unit="s")
-        return executors
-
-    @staticmethod
-    def remove_special_data_types(executors):
-        executors["status"] = executors["status"].apply(lambda x: x.value)
-        executors["side"] = executors["side"].apply(lambda x: x.value)
-        executors["close_type"] = executors["close_type"].apply(lambda x: x.value)
-        executors.drop(columns=["close_type_name", "datetime", "close_datetime"], inplace=True)
         return executors
 
     @staticmethod
