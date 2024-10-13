@@ -259,7 +259,7 @@ class AccountsService:
             logging.error(f"Timeout getting last traded prices for trading pairs {trading_pairs}")
             return {pair: Decimal("0") for pair in trading_pairs}
         except Exception as e:
-            logging.error(f"Error getting last traded prices for trading pairs {trading_pairs}: {e}")
+            logging.error(f"Error getting last traded prices in connector {connector} for trading pairs {trading_pairs}: {e}")
             return {pair: Decimal("0") for pair in trading_pairs}
 
     @staticmethod
