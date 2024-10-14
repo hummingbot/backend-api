@@ -32,7 +32,7 @@ install:
 	if conda env list | grep -q '^backend-api '; then \
 	    echo "Environment already exists."; \
 	else \
-	    conda env create -f environment_conda.yml; \
+	    conda env create -f environment.yml; \
 	fi
 	$(MAKE) install-pre-commit
 
