@@ -14,7 +14,7 @@ dependencies:
       - git+https://github.com/felixfontein/docker-py
       - python-dotenv
       - boto3
-      - python-multipart
+      - python-multipart==0.0.12
       - PyYAML
       - git+https://github.com/hummingbot/hbot-remote-client-py.git
       - flake8
