@@ -20,4 +20,3 @@ dependencies:
       - flake8
       - isort
       - pre-commit
-      - logfire[fastapi]
