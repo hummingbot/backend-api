@@ -13,5 +13,5 @@ BOTS_PATH=$(pwd)
 # Write to .env file
 echo "CONFIG_PASSWORD=$CONFIG_PASSWORD" > .env
 echo "BOTS_PATH=$BOTS_PATH" >> .env
-echo "USERNAME=$USER" >> .env
+echo "USERNAME=$USERNAME" >> .env
 echo "PASSWORD=$PASSWORD" >> .env
