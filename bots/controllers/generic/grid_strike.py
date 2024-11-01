@@ -30,11 +30,13 @@ class GridStrikeConfig(ControllerConfigBase):
     """
     controller_name: str = "grid_strike"
     candles_config: List[CandlesConfig] = []
+    controller_type = "generic"
     connector_name: str = "binance"
     trading_pair: str = "BTC-USDT"
     total_amount_quote: Decimal = Field(default=Decimal("1000"), client_data=ClientFieldData(is_updatable=True))
     grid_ranges: List[GridRange] = Field(default=[GridRange(id="R0", start_price=Decimal("40000"),
-                                                            end_price=Decimal("60000"), total_amount_pct=Decimal("0.1"))],
+                                                            end_price=Decimal("60000"),
+                                                            total_amount_pct=Decimal("0.1"))],
                                          client_data=ClientFieldData(is_updatable=True))
     position_mode: PositionMode = PositionMode.HEDGE
     leverage: int = 1
@@ -69,11 +71,12 @@ class GridStrike(ControllerBase):
     def __init__(self, config: GridStrikeConfig, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         self.config = config
-        self.trading_rules = self.market_data_provider.get_trading_rules(self.config.connector_name,
-                                                                         self.config.trading_pair)
         self._last_grid_levels_update = 0
+        self.trading_rules = None
 
     def _calculate_grid_config(self):
+        self.trading_rules = self.market_data_provider.get_trading_rules(self.config.connector_name,
+                                                                         self.config.trading_pair)
         grid_levels = []
         if self.config.min_spread_between_orders:
             spread_between_orders = self.config.min_spread_between_orders * self.get_mid_price()
@@ -92,11 +95,14 @@ class GridStrike(ControllerBase):
                 step = (grid_range.end_price - grid_range.start_price) / grid_range.end_price / orders
                 amount_quote = total_amount / orders
                 for i, price in enumerate(prices):
-                    price_quantized = self.market_data_provider.quantize_order_price(self.config.connector_name,
-                                                                                     self.config.trading_pair, price)
-                    # amount_quantized = self.market_data_provider.quantize_order_amount(self.config.connector_name,
-                    # self.config.trading_pair, amount_quote / self.get_mid_price())
-                    amount_quantized = amount_quote / self.get_mid_price()
+                    price_quantized = self.market_data_provider.quantize_order_price(
+                        self.config.connector_name,
+                        self.config.trading_pair, price)
+                    amount_quantized = self.market_data_provider.quantize_order_amount(
+                        self.config.connector_name,
+                        self.config.trading_pair,
+                        amount_quote / self.get_mid_price())
+                    # amount_quantized = amount_quote / self.get_mid_price()
                     grid_levels.append(GridLevel(id=f"{grid_range.id}_P{i}",
                                                  price=price_quantized,
                                                  amount=amount_quantized,
@@ -209,6 +215,7 @@ class GridStrike(ControllerBase):
         short_executors_to_stop = [executor.id for executor in active_executors_order_placed if
                                    executor.side == TradeType.SELL and
                                    executor.config.entry_price >= short_activation_bounds]
-        executors_id_to_stop = set(active_executor_of_non_active_ranges + long_executors_to_stop + short_executors_to_stop)
+        executors_id_to_stop = set(
+            active_executor_of_non_active_ranges + long_executors_to_stop + short_executors_to_stop)
         return [StopExecutorAction(controller_id=self.config.id, executor_id=executor) for executor in
                 list(executors_id_to_stop)]
