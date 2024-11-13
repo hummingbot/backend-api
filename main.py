@@ -17,14 +17,6 @@ password = os.getenv("PASSWORD", "admin")
 
 app = FastAPI()
 
-app.include_router(manage_docker.router)
-app.include_router(manage_broker_messages.router)
-app.include_router(manage_files.router)
-app.include_router(manage_market_data.router)
-app.include_router(manage_backtesting.router)
-app.include_router(manage_accounts.router)
-app.include_router(manage_performance.router)
-app.include_router(manage_databases.router)
 
 def auth_user(
     credentials: Annotated[HTTPBasicCredentials, Depends(security)],
@@ -54,3 +46,4 @@ app.include_router(manage_market_data.router, dependencies=[Depends(auth_user)])
 app.include_router(manage_backtesting.router, dependencies=[Depends(auth_user)])
 app.include_router(manage_accounts.router, dependencies=[Depends(auth_user)])
 app.include_router(manage_databases.router, dependencies=[Depends(auth_user)])
+app.include_router(manage_performance.router, dependencies=[Depends(auth_user)])
