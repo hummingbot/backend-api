@@ -73,6 +73,7 @@ class GridStrike(ControllerBase):
         self.config = config
         self._last_grid_levels_update = 0
         self.trading_rules = None
+        self.grid_levels = []
 
     def _calculate_grid_config(self):
         self.trading_rules = self.market_data_provider.get_trading_rules(self.config.connector_name,
@@ -93,6 +94,9 @@ class GridStrike(ControllerBase):
                 orders = int(min(theoretical_orders_by_step, theoretical_orders_by_amount))
                 prices = Distributions.linear(orders, float(grid_range.start_price), float(grid_range.end_price))
                 step = (grid_range.end_price - grid_range.start_price) / grid_range.end_price / orders
+                if orders == 0:
+                    self.logger().warning(f"Grid range {grid_range.id} has no orders, change the parameters "
+                                          f"(min order amount, amount pct, min spread between orders or total amount)")
                 amount_quote = total_amount / orders
                 for i, price in enumerate(prices):
                     price_quantized = self.market_data_provider.quantize_order_price(
@@ -100,8 +104,7 @@ class GridStrike(ControllerBase):
                         self.config.trading_pair, price)
                     amount_quantized = self.market_data_provider.quantize_order_amount(
                         self.config.connector_name,
-                        self.config.trading_pair,
-                        amount_quote / self.get_mid_price())
+                        self.config.trading_pair, amount_quote / self.get_mid_price())
                     # amount_quantized = amount_quote / self.get_mid_price()
                     grid_levels.append(GridLevel(id=f"{grid_range.id}_P{i}",
                                                  price=price_quantized,
