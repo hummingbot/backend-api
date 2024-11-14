@@ -161,7 +161,7 @@ async def delete_controller_config(config_name: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.post("delete-script-config", status_code=status.HTTP_200_OK)
+@router.post("/delete-script-config", status_code=status.HTTP_200_OK)
 async def delete_script_config(config_name: str):
     try:
         file_system.delete_file('conf/scripts', config_name)
@@ -170,7 +170,7 @@ async def delete_script_config(config_name: str):
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.post("delete-all-controller-configs", status_code=status.HTTP_200_OK)
+@router.post("/delete-all-controller-configs", status_code=status.HTTP_200_OK)
 async def delete_all_controller_configs():
     try:
         for file in file_system.list_files('conf/controllers'):
@@ -180,7 +180,7 @@ async def delete_all_controller_configs():
         raise HTTPException(status_code=404, detail=str(e))
 
 
-@router.post("delete-all-script-configs", status_code=status.HTTP_200_OK)
+@router.post("/delete-all-script-configs", status_code=status.HTTP_200_OK)
 async def delete_all_script_configs():
     try:
         for file in file_system.list_files('conf/scripts'):
