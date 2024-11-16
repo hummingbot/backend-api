@@ -2,17 +2,18 @@ version: "3.9"
 
 services:
   backend-api:
-    build: .
+    container_name: backend-api
+    image: hummingbot/backend-api:latest
     ports:
       - "8000:8000"
     volumes:
       - ./bots:/backend-api/bots
       - /var/run/docker.sock:/var/run/docker.sock
-    env_file:
-      - .env
     environment:
       - BROKER_HOST=emqx
       - BROKER_PORT=1883
+      - USERNAME=admin
+      - PASSWORD=admin
     networks:
       - emqx-bridge
   emqx:

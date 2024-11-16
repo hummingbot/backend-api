@@ -6,13 +6,15 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from routers import manage_accounts, manage_backtesting, manage_broker_messages, manage_docker, manage_files, manage_market_data
+from routers import manage_accounts, manage_backtesting, manage_broker_messages, manage_docker, manage_files, \
+    manage_market_data, manage_databases, manage_performance
 
 load_dotenv()
 security = HTTPBasic()
 
 username = os.getenv("USERNAME", "admin")
 password = os.getenv("PASSWORD", "admin")
+debug_mode = os.getenv("DEBUG_MODE", False)
 
 app = FastAPI()
 
@@ -30,7 +32,7 @@ def auth_user(
     is_correct_password = secrets.compare_digest(
         current_password_bytes, correct_password_bytes
     )
-    if not (is_correct_username and is_correct_password):
+    if not (is_correct_username and is_correct_password) and not debug_mode:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
@@ -43,4 +45,5 @@ app.include_router(manage_broker_messages.router, dependencies=[Depends(auth_use
 app.include_router(manage_files.router, dependencies=[Depends(auth_user)])
 app.include_router(manage_market_data.router, dependencies=[Depends(auth_user)])
 app.include_router(manage_backtesting.router, dependencies=[Depends(auth_user)])
-app.include_router(manage_accounts.router, dependencies=[Depends(auth_user)])
+app.include_router(manage_databases.router, dependencies=[Depends(auth_user)])
+app.include_router(manage_performance.router, dependencies=[Depends(auth_user)])
