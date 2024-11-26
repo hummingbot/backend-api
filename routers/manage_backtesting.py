@@ -3,23 +3,13 @@ from typing import Dict, Union
 from fastapi import APIRouter
 from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
 from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
-from hummingbot.strategy_v2.backtesting.controllers_backtesting.directional_trading_backtesting import (
-    DirectionalTradingBacktesting,
-)
-from hummingbot.strategy_v2.backtesting.controllers_backtesting.market_making_backtesting import MarketMakingBacktesting
 from pydantic import BaseModel
 
 from config import CONTROLLERS_MODULE, CONTROLLERS_PATH
 
 router = APIRouter(tags=["Market Backtesting"])
 candles_factory = CandlesFactory()
-directional_trading_backtesting = DirectionalTradingBacktesting()
-market_making_backtesting = MarketMakingBacktesting()
-
-BACKTESTING_ENGINES = {
-    "directional_trading": directional_trading_backtesting,
-    "market_making": market_making_backtesting
-}
+backtesting_engine = BacktestingEngineBase()
 
 
 class BacktestingConfig(BaseModel):
@@ -34,19 +24,16 @@ class BacktestingConfig(BaseModel):
 async def run_backtesting(backtesting_config: BacktestingConfig):
     try:
         if isinstance(backtesting_config.config, str):
-            controller_config = BacktestingEngineBase.get_controller_config_instance_from_yml(
+            controller_config = backtesting_engine.get_controller_config_instance_from_yml(
                 config_path=backtesting_config.config,
                 controllers_conf_dir_path=CONTROLLERS_PATH,
                 controllers_module=CONTROLLERS_MODULE
             )
         else:
-            controller_config = BacktestingEngineBase.get_controller_config_instance_from_dict(
+            controller_config = backtesting_engine.get_controller_config_instance_from_dict(
                 config_data=backtesting_config.config,
                 controllers_module=CONTROLLERS_MODULE
             )
-        backtesting_engine = BACKTESTING_ENGINES.get(controller_config.controller_type)
-        if not backtesting_engine:
-            raise ValueError(f"Backtesting engine for controller type {controller_config.controller_type} not found.")
         backtesting_results = await backtesting_engine.run_backtesting(
             controller_config=controller_config, trade_cost=backtesting_config.trade_cost,
             start=int(backtesting_config.start_time), end=int(backtesting_config.end_time),
