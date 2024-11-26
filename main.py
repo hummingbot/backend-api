@@ -6,8 +6,16 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
-from routers import manage_accounts, manage_backtesting, manage_broker_messages, manage_docker, manage_files, \
-    manage_market_data, manage_databases, manage_performance
+from routers import (
+    manage_accounts,
+    manage_backtesting,
+    manage_broker_messages,
+    manage_databases,
+    manage_docker,
+    manage_files,
+    manage_market_data,
+    manage_performance,
+)
 
 load_dotenv()
 security = HTTPBasic()
@@ -47,3 +55,4 @@ app.include_router(manage_market_data.router, dependencies=[Depends(auth_user)])
 app.include_router(manage_backtesting.router, dependencies=[Depends(auth_user)])
 app.include_router(manage_databases.router, dependencies=[Depends(auth_user)])
 app.include_router(manage_performance.router, dependencies=[Depends(auth_user)])
+app.include_router(manage_accounts.router, dependencies=[Depends(auth_user)])
