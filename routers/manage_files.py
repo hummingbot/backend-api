@@ -45,7 +45,11 @@ async def list_controllers():
                                        file != "__init__.py"]
     market_making_controllers = [file for file in file_system.list_files('controllers/market_making') if
                                  file != "__init__.py"]
-    return {"directional_trading": directional_trading_controllers, "market_making": market_making_controllers}
+    generic_controllers = [file for file in file_system.list_files('controllers/generic') if file != "__init__.py"]
+
+    return {"directional_trading": directional_trading_controllers,
+            "market_making": market_making_controllers,
+            "generic": generic_controllers}
 
 
 @router.get("/list-controllers-configs", response_model=List[str])
