@@ -9,7 +9,7 @@ dependencies:
   - libcxx
   - pip
   - pip:
-      - hummingbot==20241125
+      - hummingbot
       - numpy==1.26.4
       - git+https://github.com/felixfontein/docker-py
       - python-dotenv
