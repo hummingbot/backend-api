@@ -133,7 +133,7 @@ class BotsManager:
         for controller, performance in controllers_performance.items():
             try:
                 # Check if all the metrics are numeric
-                _ = sum(metric for key, metric in performance.items() if key != "close_type_counts")
+                _ = sum(metric for key, metric in performance.items() if key not in ("positions_summary", "close_type_counts"))
                 cleaned_performance[controller] = {
                     "status": "running",
                     "performance": performance
