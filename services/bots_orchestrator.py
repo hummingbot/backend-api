@@ -66,10 +66,16 @@ class BotsManager:
             return "hummingbot" in container.name and "broker" not in container.name
         except Exception:
             return False
+    async def get_active_containers(self):
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._sync_get_active_containers)
 
-    def get_active_containers(self):
-        return [container.name for container in self.docker_client.containers.list()
-                if container.status == 'running' and self.hummingbot_containers_fiter(container)]
+    def _sync_get_active_containers(self):
+        return [
+            container.name
+            for container in self.docker_client.containers.list()
+            if container.status == 'running' and self.hummingbot_containers_fiter(container)
+        ]
 
     def start_update_active_bots_loop(self):
         self._update_bots_task = asyncio.create_task(self.update_active_bots())
