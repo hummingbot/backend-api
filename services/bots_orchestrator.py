@@ -87,7 +87,7 @@ class BotsManager:
 
     async def update_active_bots(self, sleep_time=1):
         while True:
-            active_hbot_containers = self.get_active_containers()
+            active_hbot_containers = await self.get_active_containers()
             # Remove bots that are no longer active
             for bot in list(self.active_bots):
                 if bot not in active_hbot_containers:
