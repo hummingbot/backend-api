@@ -2,6 +2,8 @@ from decimal import Decimal
 from typing import List, Optional
 
 import pandas_ta as ta  # noqa: F401
+from pydantic.v1 import Field, validator
+
 from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
@@ -11,7 +13,6 @@ from hummingbot.strategy_v2.controllers.market_making_controller_base import (
 )
 from hummingbot.strategy_v2.executors.dca_executor.data_types import DCAExecutorConfig, DCAMode
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction, StopExecutorAction
-from pydantic import Field, validator
 
 
 class DManMakerV2Config(MarketMakingControllerConfigBase):
@@ -97,17 +98,16 @@ class DManMakerV2(MarketMakingControllerBase):
     def first_level_refresh_condition(self, executor):
         if self.config.top_executor_refresh_time is not None:
             if self.get_level_from_level_id(executor.custom_info["level_id"]) == 0:
-                return self.market_data_provider.time() - executor.timestamp > self.config.top_executor_refresh_time * 1000
+                return self.market_data_provider.time() - executor.timestamp > self.config.top_executor_refresh_time
         return False
 
     def order_level_refresh_condition(self, executor):
-        return self.market_data_provider.time() - executor.timestamp > self.config.executor_refresh_time * 1000
+        return self.market_data_provider.time() - executor.timestamp > self.config.executor_refresh_time
 
     def executors_to_refresh(self) -> List[ExecutorAction]:
         executors_to_refresh = self.filter_executors(
             executors=self.executors_info,
-            filter_func=lambda x: not x.is_trading and x.is_active and (
-                        self.order_level_refresh_condition(x) or self.first_level_refresh_condition(x)))
+            filter_func=lambda x: not x.is_trading and x.is_active and (self.order_level_refresh_condition(x) or self.first_level_refresh_condition(x)))
         return [StopExecutorAction(
             controller_id=self.config.id,
             executor_id=executor.id) for executor in executors_to_refresh]

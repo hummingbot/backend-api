@@ -11,46 +11,41 @@ from hummingbot.strategy_v2.controllers.directional_trading_controller_base impo
 )
 
 
-class BollingerV1ControllerConfig(DirectionalTradingControllerConfigBase):
-    controller_name = "bollinger_v1"
+class SmugPlugControllerConfig(DirectionalTradingControllerConfigBase):
+    controller_name = "smugplug"
     candles_config: List[CandlesConfig] = []
     candles_connector: str = Field(
-        default=None,
-        client_data=ClientFieldData(
-            prompt_on_new=True,
-            prompt=lambda mi: "Enter the connector for the candles data, leave empty to use the same exchange as the connector: ", )
-    )
+        default=None)
     candles_trading_pair: str = Field(
-        default=None,
-        client_data=ClientFieldData(
-            prompt_on_new=True,
-            prompt=lambda mi: "Enter the trading pair for the candles data, leave empty to use the same trading pair as the connector: ", )
-    )
+        default=None)
     interval: str = Field(
         default="3m",
         client_data=ClientFieldData(
             prompt=lambda mi: "Enter the candle interval (e.g., 1m, 5m, 1h, 1d): ",
             prompt_on_new=False))
-    bb_length: int = Field(
-        default=100,
+    macd_fast: int = Field(
+        default=21,
         client_data=ClientFieldData(
-            prompt=lambda mi: "Enter the Bollinger Bands length: ",
+            prompt=lambda mi: "Enter the MACD fast period: ",
             prompt_on_new=True))
-    bb_std: float = Field(
-        default=2.0,
+    macd_slow: int = Field(
+        default=42,
         client_data=ClientFieldData(
-            prompt=lambda mi: "Enter the Bollinger Bands standard deviation: ",
-            prompt_on_new=False))
-    bb_long_threshold: float = Field(
-        default=0.0,
-        client_data=ClientFieldData(
-            prompt=lambda mi: "Enter the Bollinger Bands long threshold: ",
+            prompt=lambda mi: "Enter the MACD slow period: ",
             prompt_on_new=True))
-    bb_short_threshold: float = Field(
-        default=1.0,
+    macd_signal: int = Field(
+        default=9,
         client_data=ClientFieldData(
-            prompt=lambda mi: "Enter the Bollinger Bands short threshold: ",
+            prompt=lambda mi: "Enter the MACD signal period: ",
             prompt_on_new=True))
+    # EMAs
+    ema_short: int = 8
+    ema_medium: int = 29
+    ema_long: int = 31
+
+    # ATR
+    atr_length: int = 11
+    atr_multiplier: float = 1.5
 
     @validator("candles_connector", pre=True, always=True)
     def set_candles_connector(cls, v, values):
@@ -65,10 +60,11 @@ class BollingerV1ControllerConfig(DirectionalTradingControllerConfigBase):
         return v
 
 
-class BollingerV1Controller(DirectionalTradingControllerBase):
-    def __init__(self, config: BollingerV1ControllerConfig, *args, **kwargs):
+class SmugPlugController(DirectionalTradingControllerBase):
+
+    def __init__(self, config: SmugPlugControllerConfig, *args, **kwargs):
         self.config = config
-        self.max_records = self.config.bb_length
+        self.max_records = max(config.macd_slow, config.macd_fast, config.macd_signal, config.atr_length, config.ema_short, config.ema_medium, config.ema_long) + 20
         if len(self.config.candles_config) == 0:
             self.config.candles_config = [CandlesConfig(
                 connector=config.candles_connector,
@@ -84,14 +80,23 @@ class BollingerV1Controller(DirectionalTradingControllerBase):
                                                       interval=self.config.interval,
                                                       max_records=self.max_records)
         # Add indicators
-        df.ta.bbands(length=self.config.bb_length, std=self.config.bb_std, append=True)
-        bbp = df[f"BBP_{self.config.bb_length}_{self.config.bb_std}"]
+        df.ta.macd(fast=self.config.macd_fast, slow=self.config.macd_slow, signal=self.config.macd_signal, append=True)
+        df.ta.atr(length=self.config.atr_length, append=True)
+        df.ta.ema(length=self.config.ema_short, append=True)
+        df.ta.ema(length=self.config.ema_medium, append=True)
+        df.ta.ema(length=self.config.ema_long, append=True)
+        df["long_atr_support"] = df["close"].shift(1) - df[f"ATRr_{self.config.atr_length}"] * self.config.atr_multiplier
+        df["short_atr_resistance"] = df["close"].shift(1) + df[f"ATRr_{self.config.atr_length}"] * self.config.atr_multiplier
 
-        # Generate signal
-        long_condition = bbp < self.config.bb_long_threshold
-        short_condition = bbp > self.config.bb_short_threshold
+        macdh = df[f"MACDh_{self.config.macd_fast}_{self.config.macd_slow}_{self.config.macd_signal}"]
+        short_ema = df[f"EMA_{self.config.ema_short}"]
+        medium_ema = df[f"EMA_{self.config.ema_medium}"]
+        long_ema = df[f"EMA_{self.config.ema_long}"]
+        close = df["close"]
 
-        # Generate signal
+        long_condition = (short_ema > medium_ema) & (medium_ema > long_ema) & (close > short_ema) & (close > df["long_atr_support"]) & (macdh > 0)
+        short_condition = (short_ema < medium_ema) & (medium_ema < long_ema) & (close < short_ema) & (close < df["short_atr_resistance"]) & (macdh < 0)
+
         df["signal"] = 0
         df.loc[long_condition, "signal"] = 1
         df.loc[short_condition, "signal"] = -1

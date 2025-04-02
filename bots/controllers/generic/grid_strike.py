@@ -1,6 +1,9 @@
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
 
+from pydantic.v1 import Field
+from pydantic import BaseModel
+
 from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.core.data_type.common import OrderType, PositionMode, PriceType, TradeType
 from hummingbot.core.data_type.trade_fee import TokenAmount
@@ -10,7 +13,6 @@ from hummingbot.strategy_v2.executors.position_executor.data_types import Positi
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 from hummingbot.strategy_v2.utils.distributions import Distributions
-from pydantic import BaseModel, Field
 
 
 class GridRange(BaseModel):
