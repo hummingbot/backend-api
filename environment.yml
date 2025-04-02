@@ -3,20 +3,17 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.10
+  - python=3.12
   - fastapi
   - uvicorn
+  - boto3
   - libcxx
+  - python-dotenv
+  - docker-py
+  - flake8
+  - isort
+  - pre-commit
   - pip
   - pip:
-      - hummingbot
-      - numpy==1.26.4
-      - git+https://github.com/felixfontein/docker-py
-      - python-dotenv
-      - boto3
-      - python-multipart==0.0.12
-      - PyYAML
+      - /Users/dman/Documents/code/hummingbot/dist/hummingbot-20250303-cp312-cp312-macosx_11_0_arm64.whl
       - git+https://github.com/hummingbot/hbot-remote-client-py.git
-      - flake8
-      - isort
-      - pre-commit
