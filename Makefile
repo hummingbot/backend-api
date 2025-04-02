@@ -26,7 +26,7 @@ run:
 	uvicorn main:app --reload
 
 uninstall:
-	conda env remove -n backend-api
+	conda env remove -n backend-api -y
 
 install:
 	if conda env list | grep -q '^backend-api '; then \
