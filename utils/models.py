@@ -1,7 +1,7 @@
 from typing import Any, Dict
 
 from hummingbot.client.config.config_helpers import ClientConfigAdapter
-from pydantic.v1 import SecretStr
+from pydantic import SecretStr
 
 
 class BackendAPIConfigAdapter(ClientConfigAdapter):
