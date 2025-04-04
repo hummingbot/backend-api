@@ -10,6 +10,9 @@ from typing import List, Optional
 import yaml
 from hummingbot.client.config.config_data_types import BaseClientModel
 from hummingbot.client.config.config_helpers import ClientConfigAdapter
+from hummingbot.strategy_v2.controllers.directional_trading_controller_base import DirectionalTradingControllerConfigBase
+from hummingbot.strategy_v2.controllers.market_making_controller_base import MarketMakingControllerConfigBase
+from hummingbot.strategy_v2.controllers.controller_base import ControllerConfigBase
 
 
 class FileSystemUtil:
@@ -176,6 +179,30 @@ class FileSystemUtil:
         except Exception as e:
             print(f"Error loading script class: {e}")  # Handle or log the error appropriately
         return None
+
+    @staticmethod
+    def load_controller_config_class(controller_type: str, controller_name: str):
+        """
+        Dynamically loads a controller's configuration class.
+        :param controller_name: The name of the controller file (without the '.py' extension).
+        :return: The configuration class from the controller, or None if not found.
+        """
+        try:
+            # Assuming controllers are in a package named 'controllers'
+            module_name = f"bots.controllers.{controller_type}.{controller_name.replace('.py', '')}"
+            if module_name not in sys.modules:
+                script_module = importlib.import_module(module_name)
+            else:
+                script_module = importlib.reload(sys.modules[module_name])
+
+            # Find the subclass of BaseClientModel in the module
+            for _, cls in inspect.getmembers(script_module, inspect.isclass):
+                if (issubclass(cls, DirectionalTradingControllerConfigBase) and cls is not DirectionalTradingControllerConfigBase)\
+                        or (issubclass(cls, MarketMakingControllerConfigBase) and cls is not MarketMakingControllerConfigBase)\
+                        or (issubclass(cls, ControllerConfigBase) and cls is not ControllerConfigBase):
+                    return cls
+        except Exception as e:
+            print(f"Error loading controller class: {e}")
 
     @staticmethod
     def ensure_file_and_dump_text(file_path, text):

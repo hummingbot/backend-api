@@ -3,7 +3,6 @@ from pathlib import Path
 from hummingbot.client.config.config_crypt import PASSWORD_VERIFICATION_WORD, BaseSecretsManager
 from hummingbot.client.config.config_helpers import (
     ClientConfigAdapter,
-    _load_yml_data_into_map,
     connector_name_from_file,
     get_connector_hb_config,
     read_yml_file,
@@ -47,9 +46,9 @@ class BackendAPISecurity(Security):
     def load_connector_config_map_from_file(cls, yml_path: Path) -> BackendAPIConfigAdapter:
         config_data = read_yml_file(yml_path)
         connector_name = connector_name_from_file(yml_path)
-        hb_config = get_connector_hb_config(connector_name)
+        hb_config = get_connector_hb_config(connector_name).model_validate(config_data)
         config_map = BackendAPIConfigAdapter(hb_config)
-        _load_yml_data_into_map(config_data, config_map)
+        config_map.decrypt_all_secure_data()
         return config_map
 
     @classmethod
