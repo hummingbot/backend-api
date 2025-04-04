@@ -2,6 +2,7 @@ from decimal import Decimal
 from typing import Dict, List, Set, Union
 
 import pandas_ta as ta  # noqa: F401
+from pydantic import field_validator
 from pydantic.v1 import Field, validator
 
 from hummingbot.client.config.config_data_types import ClientFieldData
@@ -83,7 +84,8 @@ class QGAConfig(ControllerConfigBase):
         """Calculate the implicit quote asset (FDUSD) allocation"""
         return Decimal("1") - sum(self.portfolio_allocation.values())
 
-    @validator("portfolio_allocation")
+    @field_validator("portfolio_allocation")
+    @classmethod
     def validate_allocation(cls, v):
         total = sum(v.values())
         if total >= Decimal("1"):
