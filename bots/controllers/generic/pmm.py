@@ -2,8 +2,8 @@ from decimal import Decimal
 from typing import Dict, List, Optional, Set, Tuple, Union
 
 from pydantic import Field, field_validator
+from pydantic_core.core_schema import ValidationInfo
 
-from hummingbot.client.config.config_data_types import ClientFieldData
 from hummingbot.core.data_type.common import OrderType, PositionMode, PriceType, TradeType
 from hummingbot.core.data_type.trade_fee import TokenAmount
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
@@ -137,9 +137,8 @@ class PMMConfig(ControllerConfigBase):
     )
     global_take_profit: Decimal = Decimal("0.02")
 
-    # TODO[pydantic]: We couldn't refactor the `validator`, please replace it by `field_validator` manually.
-    # Check https://docs.pydantic.dev/dev-v2/migration/#changes-to-validators for more information.
-    @validator("take_profit", pre=True, always=True)
+    @field_validator("take_profit", mode="before")
+    @classmethod
     def validate_target(cls, v):
         if isinstance(v, str):
             if v == "":
@@ -147,9 +146,8 @@ class PMMConfig(ControllerConfigBase):
             return Decimal(v)
         return v
 
-    # TODO[pydantic]: We couldn't refactor the `validator`, please replace it by `field_validator` manually.
-    # Check https://docs.pydantic.dev/dev-v2/migration/#changes-to-validators for more information.
-    @validator('take_profit_order_type', pre=True, allow_reuse=True, always=True)
+    @field_validator('take_profit_order_type', mode="before")
+    @classmethod
     def validate_order_type(cls, v) -> OrderType:
         if isinstance(v, OrderType):
             return v
@@ -165,20 +163,8 @@ class PMMConfig(ControllerConfigBase):
                 pass
         raise ValueError(f"Invalid order type: {v}. Valid options are: {', '.join(OrderType.__members__)}")
 
-    @property
-    def triple_barrier_config(self) -> TripleBarrierConfig:
-        return TripleBarrierConfig(
-            take_profit=self.take_profit,
-            trailing_stop=None,
-            open_order_type=OrderType.LIMIT_MAKER,  # Defaulting to LIMIT as is a Maker Controller
-            take_profit_order_type=self.take_profit_order_type,
-            stop_loss_order_type=OrderType.MARKET,  # Defaulting to MARKET as per requirement
-            time_limit_order_type=OrderType.MARKET  # Defaulting to MARKET as per requirement
-        )
-
-    # TODO[pydantic]: We couldn't refactor the `validator`, please replace it by `field_validator` manually.
-    # Check https://docs.pydantic.dev/dev-v2/migration/#changes-to-validators for more information.
-    @validator('buy_spreads', 'sell_spreads', pre=True, always=True)
+    @field_validator('buy_spreads', 'sell_spreads', mode="before")
+    @classmethod
     def parse_spreads(cls, v):
         if v is None:
             return []
@@ -188,18 +174,18 @@ class PMMConfig(ControllerConfigBase):
             return [float(x.strip()) for x in v.split(',')]
         return v
 
-    # TODO[pydantic]: We couldn't refactor the `validator`, please replace it by `field_validator` manually.
-    # Check https://docs.pydantic.dev/dev-v2/migration/#changes-to-validators for more information.
-    @validator('buy_amounts_pct', 'sell_amounts_pct', pre=True, always=True)
-    def parse_and_validate_amounts(cls, v, values, field):
+    @field_validator('buy_amounts_pct', 'sell_amounts_pct', mode="before")
+    @classmethod
+    def parse_and_validate_amounts(cls, v, validation_info: ValidationInfo):
+        field_name = validation_info.field_name
         if v is None or v == "":
-            spread_field = field.name.replace('amounts_pct', 'spreads')
-            return [1 for _ in values[spread_field]]
+            spread_field = field_name.replace('amounts_pct', 'spreads')
+            return [1 for _ in validation_info.data[spread_field]]
         if isinstance(v, str):
             return [float(x.strip()) for x in v.split(',')]
-        elif isinstance(v, list) and len(v) != len(values[field.name.replace('amounts_pct', 'spreads')]):
+        elif isinstance(v, list) and len(v) != len(validation_info.data[field_name.replace('amounts_pct', 'spreads')]):
             raise ValueError(
-                f"The number of {field.name} must match the number of {field.name.replace('amounts_pct', 'spreads')}.")
+                f"The number of {field_name} must match the number of {field_name.replace('amounts_pct', 'spreads')}.")
         return v
 
     @field_validator('position_mode', mode="before")
@@ -210,6 +196,17 @@ class PMMConfig(ControllerConfigBase):
                 return PositionMode[v.upper()]
             raise ValueError(f"Invalid position mode: {v}. Valid options are: {', '.join(PositionMode.__members__)}")
         return v
+
+    @property
+    def triple_barrier_config(self) -> TripleBarrierConfig:
+        return TripleBarrierConfig(
+            take_profit=self.take_profit,
+            trailing_stop=None,
+            open_order_type=OrderType.LIMIT_MAKER,  # Defaulting to LIMIT as is a Maker Controller
+            take_profit_order_type=self.take_profit_order_type,
+            stop_loss_order_type=OrderType.MARKET,  # Defaulting to MARKET as per requirement
+            time_limit_order_type=OrderType.MARKET  # Defaulting to MARKET as per requirement
+        )
 
     def update_parameters(self, trade_type: TradeType, new_spreads: Union[List[float], str], new_amounts_pct: Optional[Union[List[int], str]] = None):
         spreads_field = 'buy_spreads' if trade_type == TradeType.BUY else 'sell_spreads'
