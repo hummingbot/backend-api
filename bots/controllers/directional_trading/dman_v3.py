@@ -3,9 +3,6 @@ from decimal import Decimal
 from typing import List, Optional, Tuple
 
 import pandas_ta as ta  # noqa: F401
-from pydantic import Field, field_validator
-from pydantic_core.core_schema import ValidationInfo
-
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.strategy_v2.controllers.directional_trading_controller_base import (
@@ -14,6 +11,8 @@ from hummingbot.strategy_v2.controllers.directional_trading_controller_base impo
 )
 from hummingbot.strategy_v2.executors.dca_executor.data_types import DCAExecutorConfig, DCAMode
 from hummingbot.strategy_v2.executors.position_executor.data_types import TrailingStop
+from pydantic import Field, field_validator
+from pydantic_core.core_schema import ValidationInfo
 
 
 class DManV3ControllerConfig(DirectionalTradingControllerConfigBase):
@@ -40,6 +39,13 @@ class DManV3ControllerConfig(DirectionalTradingControllerConfigBase):
     bb_std: float = Field(default=2.0)
     bb_long_threshold: float = Field(default=0.0)
     bb_short_threshold: float = Field(default=1.0)
+    trailing_stop: Optional[TrailingStop] = Field(
+        default="0.015,0.005",
+        json_schema_extra={
+            "prompt": "Enter the trailing stop parameters (activation_price, trailing_delta) as a comma-separated list: ",
+            "prompt_on_new": True,
+        }
+    )
     dca_spreads: List[Decimal] = Field(
         default="0.001,0.018,0.15,0.25",
         json_schema_extra={
@@ -186,8 +192,12 @@ class DManV3Controller(DirectionalTradingControllerBase):
             prices = [price * (1 + spread * spread_multiplier) for spread in spread]
         if self.config.dynamic_target:
             stop_loss = self.config.stop_loss * spread_multiplier
-            trailing_stop = TrailingStop(activation_price=self.config.trailing_stop.activation_price * spread_multiplier,
-                                         trailing_delta=self.config.trailing_stop.trailing_delta * spread_multiplier)
+            if self.config.trailing_stop:
+                trailing_stop = TrailingStop(
+                    activation_price=self.config.trailing_stop.activation_price * spread_multiplier,
+                    trailing_delta=self.config.trailing_stop.trailing_delta * spread_multiplier)
+            else:
+                trailing_stop = None
         else:
             stop_loss = self.config.stop_loss
             trailing_stop = self.config.trailing_stop
