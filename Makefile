@@ -34,6 +34,7 @@ install:
 	else \
 	    conda env create -f environment.yml; \
 	fi
+	conda activate backend-api
 	$(MAKE) install-pre-commit
 
 install-pre-commit:
