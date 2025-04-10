@@ -27,10 +27,9 @@ class AccountsService:
     """
 
     def __init__(self,
-                 update_account_state_interval_minutes: int = 1,
+                 update_account_state_interval_minutes: int = 5,
                  default_quote: str = "USDT",
-                 account_history_file: str = "account_state_history.json",
-                 account_history_dump_interval_minutes: int = 1):
+                 account_history_file: str = "account_state_history.json"):
         # TODO: Add database to store the balances of each account each time it is updated.
         self.secrets_manager = ETHKeyFileSecretManger(CONFIG_PASSWORD)
         self.accounts = {}
@@ -40,14 +39,15 @@ class AccountsService:
         self.update_account_state_interval = update_account_state_interval_minutes * 60
         self.default_quote = default_quote
         self.history_file = account_history_file
-        self.account_history_dump_interval = account_history_dump_interval_minutes
         self._update_account_state_task: Optional[asyncio.Task] = None
-        self._dump_account_state_task: Optional[asyncio.Task] = None
 
     def get_accounts_state(self):
         return self.accounts_state
 
-    def get_default_market(self, token):
+    def get_default_market(self, token: str):
+        if token.startswith("LD") and token != "LDO":
+            # These tokens are staked in binance earn
+            token = token.replace("LD", "")
         return f"{token}-{self.default_quote}"
 
     def start_update_account_state_loop(self):
@@ -56,7 +56,6 @@ class AccountsService:
         :return:
         """
         self._update_account_state_task = asyncio.create_task(self.update_account_state_loop())
-        self._dump_account_state_task = asyncio.create_task(self.dump_account_state_loop())
 
     def stop_update_account_state_loop(self):
         """
@@ -65,10 +64,7 @@ class AccountsService:
         """
         if self._update_account_state_task:
             self._update_account_state_task.cancel()
-        if self._dump_account_state_task:
-            self._dump_account_state_task.cancel()
         self._update_account_state_task = None
-        self._dump_account_state_task = None
 
     async def update_account_state_loop(self):
         """
@@ -81,30 +77,11 @@ class AccountsService:
                 await self.update_balances()
                 await self.update_trading_rules()
                 await self.update_account_state()
+                await self.dump_account_state()
             except Exception as e:
                 logging.error(f"Error updating account state: {e}")
             finally:
                 await asyncio.sleep(self.update_account_state_interval)
-
-    async def dump_account_state_loop(self):
-        """
-        The loop that dumps the current account state to a file at fixed intervals.
-        :return:
-        """
-        await self.account_state_update_event.wait()
-        while True:
-            try:
-                await self.dump_account_state()
-            except Exception as e:
-                logging.error(f"Error dumping account state: {e}")
-            finally:
-                now = datetime.now()
-                next_log_time = (now + timedelta(minutes=self.account_history_dump_interval)).replace(second=0,
-                                                                                                      microsecond=0)
-                next_log_time = next_log_time - timedelta(
-                    minutes=next_log_time.minute % self.account_history_dump_interval)
-                sleep_duration = (next_log_time - now).total_seconds()
-                await asyncio.sleep(sleep_duration)
 
     async def dump_account_state(self):
         """
@@ -252,8 +229,6 @@ class AccountsService:
         try:
             # TODO: Fix OKX connector to return the markets in Hummingbot format.
             last_traded = await asyncio.wait_for(connector.get_last_traded_prices(trading_pairs=trading_pairs), timeout=timeout)
-            if connector.name == "okx_perpetual":
-                return {pair.strip("-SWAP"): value for pair, value in last_traded.items()}
             return last_traded
         except asyncio.TimeoutError:
             logging.error(f"Timeout getting last traded prices for trading pairs {trading_pairs}")

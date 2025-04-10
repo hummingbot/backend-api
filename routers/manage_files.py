@@ -51,6 +51,21 @@ async def list_controllers():
             "market_making": market_making_controllers,
             "generic": generic_controllers}
 
+@router.get("/controller-config-pydantic/{controller_type}/{controller_name}", response_model=dict)
+async def get_controller_config_pydantic(controller_type: str, controller_name: str):
+    """
+    Retrieves the configuration parameters for a given controller.
+    :param controller_name: The name of the controller.
+    :return: JSON containing the configuration parameters.
+    """
+    config_class = file_system.load_controller_config_class(controller_type, controller_name)
+    if config_class is None:
+        raise HTTPException(status_code=404, detail="Controller configuration class not found")
+
+    # Extracting fields and default values
+    config_fields = {name: field.default for name, field in config_class.model_fields.items()}
+    return json.loads(json.dumps(config_fields, default=str))
+
 
 @router.get("/list-controllers-configs", response_model=List[str])
 async def list_controllers_configs():

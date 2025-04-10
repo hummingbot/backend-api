@@ -8,7 +8,7 @@ class BackendAPIConfigAdapter(ClientConfigAdapter):
     def _encrypt_secrets(self, conf_dict: Dict[str, Any]):
         from utils.security import BackendAPISecurity
         for attr, value in conf_dict.items():
-            attr_type = self._hb_config.__fields__[attr].type_
+            attr_type = self._hb_config.model_fields[attr].annotation
             if attr_type == SecretStr:
                 clear_text_value = value.get_secret_value() if isinstance(value, SecretStr) else value
                 conf_dict[attr] = BackendAPISecurity.secrets_manager.encrypt_secret_value(attr, clear_text_value)

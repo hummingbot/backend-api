@@ -1,19 +1,11 @@
 import asyncio
 
 from fastapi import APIRouter
-from hummingbot.data_feed.candles_feed.candles_factory import CandlesConfig, CandlesFactory
-from pydantic import BaseModel
+from hummingbot.data_feed.candles_feed.candles_factory import CandlesFactory
+from hummingbot.data_feed.candles_feed.data_types import CandlesConfig, HistoricalCandlesConfig
 
 router = APIRouter(tags=["Market Data"])
 candles_factory = CandlesFactory()
-
-
-class HistoricalCandlesConfig(BaseModel):
-    connector_name: str = "binance_perpetual"
-    trading_pair: str = "BTC-USDT"
-    interval: str = "3m"
-    start_time: int = 1672542000
-    end_time: int = 1672628400
 
 
 @router.post("/real-time-candles")

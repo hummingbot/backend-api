@@ -26,7 +26,7 @@ run:
 	uvicorn main:app --reload
 
 uninstall:
-	conda env remove -n backend-api
+	conda env remove -n backend-api -y
 
 install:
 	if conda env list | grep -q '^backend-api '; then \
@@ -34,6 +34,7 @@ install:
 	else \
 	    conda env create -f environment.yml; \
 	fi
+	conda activate backend-api
 	$(MAKE) install-pre-commit
 
 install-pre-commit:

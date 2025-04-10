@@ -12,4 +12,4 @@ BROKER_PORT = int(os.getenv("BROKER_PORT", 1883))
 BROKER_USERNAME = os.getenv("BROKER_USERNAME", "admin")
 BROKER_PASSWORD = os.getenv("BROKER_PASSWORD", "password")
 PASSWORD_VERIFICATION_PATH = "bots/credentials/master_account/.password_verification"
-BANNED_TOKENS = os.getenv("BANNED_TOKENS", "NAV,ARS,ETHW").split(",")
+BANNED_TOKENS = os.getenv("BANNED_TOKENS", "NAV,ARS,ETHW,ETHF").split(",")
