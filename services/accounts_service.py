@@ -47,7 +47,7 @@ class AccountsService:
     def get_default_market(self, token: str):
         if token.startswith("LD") and token != "LDO":
             # These tokens are staked in binance earn
-            token = token.replace("LD", "")
+            token = token[2:]
         return f"{token}-{self.default_quote}"
 
     def start_update_account_state_loop(self):
