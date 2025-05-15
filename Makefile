@@ -7,6 +7,7 @@
 .PHONY: install-pre-commit
 .PHONY: docker_build
 .PHONY: docker_run
+.PHONY: reference-local-hummingbot
 
 
 detect_conda_bin := $(shell bash -c 'if [ "${CONDA_EXE} " == " " ]; then \
@@ -44,7 +45,11 @@ install-pre-commit:
 	fi && pre-commit install'
 
 docker_build:
-	docker build -t hummingbot/backend-api:latest .
+	docker build -t hummingbot/backend-api$(TAG) .
 
 docker_run:
 	docker compose up -d
+
+# See reference_local_hummingbot.sh for available options
+reference-local-hummingbot:
+	bash ./scripts/reference_local_hummingbot.sh $(if $(force-repackage),--force-repackage,) $(if $(build-env),--build-env=$(build-env),) $(ARGS)
