@@ -3,9 +3,10 @@ Repository for executor database operations.
 """
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, case, desc, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import ExecutorOrder, ExecutorRecord, PositionHoldRecord
@@ -30,9 +31,15 @@ class ExecutorRepository:
             trading_pair: str,
             config: Optional[str] = None,
             status: str = "RUNNING",
-            controller_id: str = "main"
+            controller_id: str = "main",
+            created_at: Optional[datetime] = None
     ) -> ExecutorRecord:
-        """Create a new executor record."""
+        """Create a new executor record.
+
+        `created_at` defaults to the server clock; pass it only when the row is being
+        written after the fact (see upsert_executor_completion) so the record still
+        orders by when the executor actually started.
+        """
         executor = ExecutorRecord(
             executor_id=executor_id,
             executor_type=executor_type,
@@ -43,6 +50,8 @@ class ExecutorRepository:
             config=config,
             status=status
         )
+        if created_at is not None:
+            executor.created_at = created_at
 
         self.session.add(executor)
         await self.session.flush()
@@ -89,6 +98,75 @@ class ExecutorRepository:
             await self.session.refresh(executor)
 
         return executor
+
+    async def upsert_executor_completion(
+            self,
+            executor_id: str,
+            executor_type: str,
+            account_name: str,
+            connector_name: str,
+            trading_pair: str,
+            controller_id: str = "main",
+            config: Optional[str] = None,
+            created_at: Optional[datetime] = None,
+            status: Optional[str] = None,
+            close_type: Optional[str] = None,
+            net_pnl_quote: Optional[Decimal] = None,
+            net_pnl_pct: Optional[Decimal] = None,
+            cum_fees_quote: Optional[Decimal] = None,
+            filled_amount_quote: Optional[Decimal] = None,
+            final_state: Optional[str] = None,
+            error_log: Optional[str] = None
+    ) -> Tuple[Optional[ExecutorRecord], bool]:
+        """Write an executor's final state, creating its row if it is not there yet.
+
+        `update_executor` is select-then-update, so it silently does nothing when the
+        creation INSERT has not landed: an executor that closes milliseconds after
+        start can have its completion written before (or instead of) its creation row,
+        and the final state would just be dropped, leaving a phantom RUNNING executor.
+        This is the same insert-or-update shape `upsert_position_hold` already uses.
+
+        Returns (record, created) where `created` is True if the row had to be
+        repaired — the caller is expected to log that, it is never normal.
+        """
+        completion = dict(
+            status=status,
+            close_type=close_type,
+            net_pnl_quote=net_pnl_quote,
+            net_pnl_pct=net_pnl_pct,
+            cum_fees_quote=cum_fees_quote,
+            filled_amount_quote=filled_amount_quote,
+            final_state=final_state,
+            error_log=error_log,
+        )
+
+        executor = await self.update_executor(executor_id=executor_id, **completion)
+        if executor is not None:
+            return executor, False
+
+        # No row: insert one from the metadata the caller carries. A creation INSERT
+        # racing us in another session can still win between our SELECT and this
+        # INSERT, so do it in a SAVEPOINT and fall back to the update — the outer
+        # transaction stays usable either way.
+        created = True
+        try:
+            async with self.session.begin_nested():
+                await self.create_executor(
+                    executor_id=executor_id,
+                    executor_type=executor_type,
+                    account_name=account_name,
+                    connector_name=connector_name,
+                    trading_pair=trading_pair,
+                    config=config,
+                    status=status or "RUNNING",
+                    controller_id=controller_id,
+                    created_at=created_at,
+                )
+        except IntegrityError:
+            created = False
+
+        executor = await self.update_executor(executor_id=executor_id, **completion)
+        return executor, created
 
     async def get_executor_by_id(self, executor_id: str) -> Optional[ExecutorRecord]:
         """Get an executor by ID."""

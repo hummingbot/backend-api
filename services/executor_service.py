@@ -32,6 +32,7 @@ from hummingbot.strategy_v2.executors.twap_executor.twap_executor import TWAPExe
 from hummingbot.strategy_v2.executors.xemm_executor.data_types import XEMMExecutorConfig
 from hummingbot.strategy_v2.executors.xemm_executor.xemm_executor import XEMMExecutor
 from hummingbot.strategy_v2.models.executors import CloseType, TrackedOrder
+from sqlalchemy.exc import IntegrityError
 
 from database import AsyncDatabaseManager, ExecutorRepository, GatewayCLMMRepository, GatewaySwapRepository
 from models.executors import PositionHold
@@ -1379,6 +1380,14 @@ class ExecutorService:
 
             logger.debug(f"Persisted executor {executor_id} creation to database")
 
+        except IntegrityError:
+            # The executor closed before this INSERT landed and its completion already
+            # wrote the row (see upsert_executor_completion). That row carries the final
+            # state; re-inserting a RUNNING one is exactly what must not happen.
+            logger.debug(
+                f"Executor {executor_id} row already written by its completion; "
+                f"skipping the creation insert"
+            )
         except Exception as e:
             logger.error(f"Error persisting executor creation: {e}")
 
@@ -1465,8 +1474,19 @@ class ExecutorService:
             async with self.db_manager.get_session_context() as session:
                 repo = ExecutorRepository(session)
 
-                await repo.update_executor(
+                # Upsert, not update: an executor that closes in milliseconds can reach
+                # here before _persist_executor_created's INSERT has landed (or after it
+                # failed outright), and a plain select-then-update would silently drop
+                # this final state, leaving a phantom RUNNING executor forever.
+                record, repaired = await repo.upsert_executor_completion(
                     executor_id=executor_id,
+                    executor_type=executor_type,
+                    account_name=metadata.get("account_name"),
+                    connector_name=metadata.get("connector_name"),
+                    trading_pair=metadata.get("trading_pair"),
+                    controller_id=metadata.get("controller_id", "main"),
+                    config=json.dumps(metadata.get("config", {}), default=_json_default),
+                    created_at=metadata.get("created_at"),
                     status=status_name,
                     close_type=close_type,
                     net_pnl_quote=net_pnl_quote,
@@ -1477,7 +1497,18 @@ class ExecutorService:
                     error_log=error_log_json
                 )
 
-            logger.debug(f"Persisted executor {executor_id} completion to database")
+            if record is None:
+                logger.error(
+                    f"Could not persist completion for executor {executor_id}: no row to "
+                    f"update and the repair insert did not take"
+                )
+            elif repaired:
+                logger.warning(
+                    f"Executor {executor_id} completed before its creation row existed; "
+                    f"inserted the record from its final state"
+                )
+            else:
+                logger.debug(f"Persisted executor {executor_id} completion to database")
 
         except Exception as e:
             logger.error(f"Error persisting executor completion: {e}")
