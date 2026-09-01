@@ -175,6 +175,20 @@ class DockerService:
             raise ValueError(f"Invalid {label}: '{path}' resolves outside of '{base_dir}'.")
         return resolved_path
 
+    @classmethod
+    def resolve_instance_dir(cls, instance_name: str) -> str:
+        """
+        Resolve the `bots/instances` directory that belongs to `instance_name`.
+
+        Bot containers are named after their instance verbatim, so this directory is also what
+        identifies a container as one this API created. Raises ValueError if the name escapes
+        `bots/instances`.
+        """
+        instances_base = os.path.join("bots", "instances")
+        instance_dir = os.path.join(instances_base, instance_name)
+        cls._ensure_contained(instance_dir, instances_base, "instance_name")
+        return instance_dir
+
     def create_hummingbot_instance(self, config: V2ControllerDeployment):
         bots_path = os.environ.get('BOTS_PATH', self.SOURCE_PATH)  # Default to 'SOURCE_PATH' if BOTS_PATH is not set
         instance_name = config.instance_name
