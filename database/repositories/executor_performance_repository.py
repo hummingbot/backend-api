@@ -130,6 +130,69 @@ class ExecutorPerformanceRepository:
         result = await self.session.execute(query)
         return {s.executor_id: self._to_dict(s) for s in result.scalars().all()}
 
+    async def get_latest(
+        self,
+        executor_id: Optional[str] = None,
+        executor_type: Optional[str] = None,
+        controller_id: Optional[str] = None,
+        account_name: Optional[str] = None,
+        connector_name: Optional[str] = None,
+        trading_pair: Optional[str] = None,
+        limit: Optional[int] = None,
+    ) -> List[Dict]:
+        """The most recent snapshot of every matching executor, newest first.
+
+        The executor counterpart of ControllerPerformanceRepository.get_latest_performance,
+        with two differences this population forces. Every executor that ever ran leaves a
+        terminal row behind, so an unfiltered "latest per scope" grows without bound here
+        in a way the controller one does not: this orders newest-first and takes a limit,
+        which puts the live executors -- the only ones still being snapshotted -- at the
+        top. And a closed executor's latest row IS its terminal row, so this answers "its
+        final value" and "its current value" with the same query.
+
+        This reads the series, not memory: an executor younger than one snapshot interval
+        has no row yet, and a live one is up to an interval stale. That is deliberate --
+        the last point of /performance/latest and the last point of /performance/history
+        are the same row. In-memory current figures are what /executors/ serves.
+        """
+        latest = select(
+            ExecutorPerformanceSnapshot.executor_id,
+            func.max(ExecutorPerformanceSnapshot.timestamp).label("max_timestamp"),
+        ).group_by(ExecutorPerformanceSnapshot.executor_id)
+
+        # The filters go on the grouped subquery rather than the join: they decide which
+        # executors are aggregated at all, instead of aggregating the whole table and
+        # throwing most of it away afterwards. Every one of them is constant across an
+        # executor's rows, so this cannot change which row wins the max.
+        if executor_id:
+            latest = latest.where(ExecutorPerformanceSnapshot.executor_id == executor_id)
+        if executor_type:
+            latest = latest.where(ExecutorPerformanceSnapshot.executor_type == executor_type)
+        if controller_id:
+            latest = latest.where(ExecutorPerformanceSnapshot.controller_id == controller_id)
+        if account_name:
+            latest = latest.where(ExecutorPerformanceSnapshot.account_name == account_name)
+        if connector_name:
+            latest = latest.where(ExecutorPerformanceSnapshot.connector_name == connector_name)
+        if trading_pair:
+            latest = latest.where(ExecutorPerformanceSnapshot.trading_pair == trading_pair)
+        latest = latest.subquery()
+
+        query = (
+            select(ExecutorPerformanceSnapshot)
+            .join(
+                latest,
+                (ExecutorPerformanceSnapshot.executor_id == latest.c.executor_id) &
+                (ExecutorPerformanceSnapshot.timestamp == latest.c.max_timestamp)
+            )
+            .order_by(desc(ExecutorPerformanceSnapshot.timestamp))
+        )
+        if limit:
+            query = query.limit(limit)
+
+        result = await self.session.execute(query)
+        return [self._to_dict(s) for s in result.scalars().all()]
+
     async def get_performance_history(
         self,
         executor_id: Optional[str] = None,

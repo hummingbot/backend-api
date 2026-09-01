@@ -550,7 +550,8 @@ class TestTheNormalizedRow:
 # The route: one URL, one envelope, and filters that belong to their subject
 # --------------------------------------------------------------------------------------
 
-def _client(controller_history=None, executor_history=None):
+def _client(controller_history=None, executor_history=None,
+            controller_latest=None, executor_latest=None):
     """The performance router alone, with both services stubbed."""
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -569,8 +570,18 @@ def _client(controller_history=None, executor_history=None):
         executor_service.last_call = kwargs
         return executor_history or ([], None, False)
 
+    async def _controllers_latest(**kwargs):
+        bots_manager.last_latest_call = kwargs
+        return list(controller_latest or [])
+
+    async def _executors_latest(**kwargs):
+        executor_service.last_latest_call = kwargs
+        return list(executor_latest or [])
+
     bots_manager.get_controller_performance_history = _controllers
     executor_service.get_executor_performance_history = _executors
+    bots_manager.get_latest_controller_performance = _controllers_latest
+    executor_service.get_latest_executor_performance = _executors_latest
 
     app = FastAPI()
     app.include_router(performance_router.router)
@@ -741,3 +752,232 @@ def _with_session(service, session):
         yield session
 
     service.db_manager = SimpleNamespace(get_session_context=_context)
+
+
+# --------------------------------------------------------------------------------------
+# /performance/latest: the current value of every scope, so a consumer can drop
+# /bot-orchestration/controller-performance-latest as well as -history
+# --------------------------------------------------------------------------------------
+
+def _controller_latest_row(controller_id="c-1", bot_name="bot-a", timestamp=NOW, pnl=4.5):
+    return {
+        "timestamp": timestamp.isoformat(),
+        "bot_name": bot_name,
+        "controller_id": controller_id,
+        "status": "running",
+        "performance": {"global_pnl_quote": pnl, "volume_traded": 1000.0},
+        "custom_info": {"levels": 4},
+    }
+
+
+class TestTheLatestQuery:
+    @pytest.mark.asyncio
+    async def test_it_returns_the_last_row_of_each_executor(self):
+        session = _RecordingSession([_scalars([
+            _snapshot(executor_id="e-2", net_pnl="7"),
+            _snapshot(executor_id="e-1", net_pnl="3"),
+        ])])
+
+        rows = await ExecutorPerformanceRepository(session).get_latest()
+
+        assert [r["executor_id"] for r in rows] == ["e-2", "e-1"]
+        assert rows[0]["net_pnl_quote"] == 7.0
+
+    @pytest.mark.asyncio
+    async def test_it_orders_newest_first_and_takes_a_limit(self):
+        """Every executor that ever ran leaves a terminal row, so the unfiltered result
+        would grow without bound. Newest-first plus a limit puts the executors that are
+        still being snapshotted at the top."""
+        session = _RecordingSession([_scalars([])])
+
+        await ExecutorPerformanceRepository(session).get_latest(limit=25)
+
+        sql = str(session.executed[0].compile(compile_kwargs={"literal_binds": True}))
+        assert "ORDER BY" in sql and "DESC" in sql
+        assert "LIMIT 25" in sql
+
+    @pytest.mark.asyncio
+    async def test_no_limit_means_no_limit_clause(self):
+        session = _RecordingSession([_scalars([])])
+
+        await ExecutorPerformanceRepository(session).get_latest()
+
+        assert "LIMIT" not in str(session.executed[0].compile(compile_kwargs={"literal_binds": True}))
+
+    @pytest.mark.asyncio
+    async def test_a_filter_narrows_the_grouped_subquery(self):
+        """The filter decides which executors are aggregated at all, rather than
+        aggregating the whole table and discarding most of it afterwards."""
+        session = _RecordingSession([_scalars([])])
+
+        await ExecutorPerformanceRepository(session).get_latest(account_name="master_account")
+
+        sql = str(session.executed[0].compile(compile_kwargs={"literal_binds": True}))
+        grouped = sql.split("GROUP BY")[0]
+        assert "master_account" in grouped, "the filter landed outside the grouped subquery"
+
+    @pytest.mark.asyncio
+    async def test_a_closed_executors_last_row_is_its_terminal_row(self):
+        """So "the final value" needs no second call and no join to `executors`."""
+        session = _RecordingSession([_scalars([
+            _snapshot(is_terminal=True, close_type="TAKE_PROFIT", net_pnl="9", status="TERMINATED"),
+        ])])
+
+        rows = await ExecutorPerformanceRepository(session).get_latest()
+
+        assert rows[0]["is_terminal"] is True
+        assert rows[0]["close_type"] == "TAKE_PROFIT"
+
+
+class TestTheLatestRoute:
+    def test_it_serves_the_executor_scopes_in_the_normalized_shape(self):
+        rows = [ExecutorPerformanceRepository._to_dict(_snapshot(net_pnl="12.5", filled="4200"))]
+        client, _, _ = _client(executor_latest=rows)
+
+        response = client.get("/performance/latest", params={"subject": "executor"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert body["data"][0]["subject"] == "executor"
+        assert body["data"][0]["scope_id"] == "e-1"
+        assert body["data"][0]["volume_quote"] == 4200.0
+        # One row per scope is not a series: there is nothing to cursor through.
+        assert "pagination" not in body
+
+    def test_it_serves_the_controller_scopes_through_the_existing_query_path(self):
+        client, bots_manager, _ = _client(controller_latest=[_controller_latest_row()])
+
+        response = client.get("/performance/latest", params={"subject": "controller", "bot_name": "bot-a"})
+
+        assert response.status_code == 200
+        row = response.json()["data"][0]
+        assert row["subject"] == "controller"
+        assert row["scope_id"] == "c-1"
+        assert row["global_pnl_quote"] == 4.5
+        assert row["cum_fees_quote"] is None
+        assert row["performance"]["volume_traded"] == 1000.0
+        assert bots_manager.last_latest_call["bot_name"] == "bot-a"
+
+    def test_the_controller_scopes_come_back_newest_first(self):
+        """get_latest_controller_performance returns join order, so the route sorts --
+        otherwise `limit` would truncate an arbitrary set of scopes."""
+        older = _controller_latest_row(controller_id="old", timestamp=NOW - timedelta(hours=2))
+        newer = _controller_latest_row(controller_id="new", timestamp=NOW)
+        client, _, _ = _client(controller_latest=[older, newer])
+
+        response = client.get("/performance/latest", params={"subject": "controller"})
+
+        assert [r["scope_id"] for r in response.json()["data"]] == ["new", "old"]
+
+    def test_a_malformed_controller_timestamp_sorts_last_instead_of_500ing(self):
+        """One bad row must not take down a dashboard's whole tile set."""
+        bad = _controller_latest_row(controller_id="bad")
+        bad["timestamp"] = "not-a-timestamp"
+        client, _, _ = _client(controller_latest=[bad, _controller_latest_row(controller_id="good")])
+
+        response = client.get("/performance/latest", params={"subject": "controller"})
+
+        assert response.status_code == 200
+        assert [r["scope_id"] for r in response.json()["data"]] == ["good", "bad"]
+
+    def test_controller_id_narrows_the_controller_scopes(self):
+        """get_latest_controller_performance only takes bot_name -- it is the method the
+        wire-compatible route calls and is deliberately unchanged -- so the route filters."""
+        client, _, _ = _client(controller_latest=[
+            _controller_latest_row(controller_id="c-1"),
+            _controller_latest_row(controller_id="c-2"),
+        ])
+
+        response = client.get("/performance/latest",
+                              params={"subject": "controller", "controller_id": "c-2"})
+
+        assert [r["scope_id"] for r in response.json()["data"]] == ["c-2"]
+
+    def test_the_limit_caps_the_controller_scopes(self):
+        client, _, _ = _client(controller_latest=[
+            _controller_latest_row(controller_id=f"c-{i}", timestamp=NOW - timedelta(minutes=i))
+            for i in range(5)
+        ])
+
+        response = client.get("/performance/latest", params={"subject": "controller", "limit": 2})
+
+        assert [r["scope_id"] for r in response.json()["data"]] == ["c-0", "c-1"]
+
+    def test_the_limit_reaches_the_executor_query(self):
+        client, _, executor_service = _client()
+
+        client.get("/performance/latest", params={"subject": "executor", "limit": 7})
+
+        assert executor_service.last_latest_call["limit"] == 7
+
+    def test_an_executor_filter_on_the_controller_subject_is_a_400(self):
+        client, _, _ = _client()
+
+        response = client.get("/performance/latest",
+                              params={"subject": "controller", "executor_id": "e-1"})
+
+        assert response.status_code == 400
+        assert "executor_id" in response.json()["detail"]
+
+    def test_a_bot_name_on_the_executor_subject_is_a_400(self):
+        client, _, _ = _client()
+
+        response = client.get("/performance/latest",
+                              params={"subject": "executor", "bot_name": "bot-a"})
+
+        assert response.status_code == 400
+        assert "bot_name" in response.json()["detail"]
+
+    def test_both_routes_enforce_the_same_filter_rule(self):
+        """One helper, so /history and /latest cannot drift into disagreeing about which
+        filter belongs to which population."""
+        client, _, _ = _client()
+
+        for path in ("/performance/history", "/performance/latest"):
+            assert client.get(path, params={"subject": "controller", "trading_pair": "BTC-USDT"}).status_code == 400
+            assert client.get(path, params={"subject": "executor", "bot_name": "b"}).status_code == 400
+
+    def test_the_subject_is_required(self):
+        client, _, _ = _client()
+
+        assert client.get("/performance/latest").status_code == 422
+
+    def test_the_limit_is_clamped_at_a_thousand(self):
+        client, _, _ = _client()
+
+        assert client.get("/performance/latest",
+                          params={"subject": "executor", "limit": 1001}).status_code == 422
+
+    def test_both_subjects_produce_the_same_field_set(self):
+        """The whole point: latestFor(scope) is written once, not twice."""
+        executor_client, _, _ = _client(
+            executor_latest=[ExecutorPerformanceRepository._to_dict(_snapshot())])
+        controller_client, _, _ = _client(controller_latest=[_controller_latest_row()])
+
+        executor_row = executor_client.get(
+            "/performance/latest", params={"subject": "executor"}).json()["data"][0]
+        controller_row = controller_client.get(
+            "/performance/latest", params={"subject": "controller"}).json()["data"][0]
+
+        assert executor_row.keys() == controller_row.keys()
+
+    def test_it_shares_the_row_shape_with_the_history_route(self):
+        """A dashboard's live tiles and its charts read the same fields off one client."""
+        row = ExecutorPerformanceRepository._to_dict(_snapshot())
+        client, _, _ = _client(executor_latest=[row], executor_history=([row], None, False))
+
+        latest = client.get("/performance/latest", params={"subject": "executor"}).json()["data"][0]
+        history = client.get("/performance/history", params={"subject": "executor"}).json()["data"][0]
+
+        assert latest == history
+
+    def test_the_old_latest_route_still_exists(self):
+        """Wire compatibility is absolute: this is new surface, and a consumer migrates
+        when it chooses to."""
+        import inspect
+
+        import routers.bot_orchestration as bot_orchestration
+
+        source = inspect.getsource(bot_orchestration)
+        assert '@router.get("/controller-performance-latest")' in source

@@ -729,6 +729,32 @@ class ExecutorService:
                 interval=interval,
             )
 
+    async def get_latest_executor_performance(
+        self,
+        executor_id: Optional[str] = None,
+        executor_type: Optional[str] = None,
+        controller_id: Optional[str] = None,
+        account_name: Optional[str] = None,
+        connector_name: Optional[str] = None,
+        trading_pair: Optional[str] = None,
+        limit: Optional[int] = None,
+    ):
+        """The last snapshot of each matching executor. Mirrors
+        BotsOrchestrator.get_latest_controller_performance."""
+        async with self.db_manager.get_session_context() as session:
+            repo = ExecutorPerformanceRepository(
+                session, grain_minutes=self.performance_snapshot_interval / 60.0
+            )
+            return await repo.get_latest(
+                executor_id=executor_id,
+                executor_type=executor_type,
+                controller_id=controller_id,
+                account_name=account_name,
+                connector_name=connector_name,
+                trading_pair=trading_pair,
+                limit=limit,
+            )
+
     def _get_trading_interface(self, account_name: str) -> AccountTradingInterface:
         """Get or create an AccountTradingInterface for the account."""
         if account_name not in self._trading_interfaces:

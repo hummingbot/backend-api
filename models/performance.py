@@ -82,6 +82,18 @@ class PerformanceHistoryResponse(BaseModel):
     )
 
 
+class PerformanceLatestResponse(BaseModel):
+    """Envelope of GET /performance/latest.
+
+    No pagination block: this is one row per scope, not a series, so there is no cursor
+    to walk and no interval to sample. `limit` is a cap on how many scopes come back,
+    newest-first, not a page boundary.
+    """
+
+    status: str = Field(default="success")
+    data: List[PerformanceRow]
+
+
 def _as_float(value: Any) -> float:
     try:
         return float(value)
