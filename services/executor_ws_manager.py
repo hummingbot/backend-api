@@ -90,10 +90,21 @@ def _compute_hash(data: Any) -> str:
 
 
 def _clamp_interval(interval: Optional[float]) -> float:
-    """Clamp update interval to the configured executor WebSocket range."""
+    """Clamp update interval to the configured executor WebSocket range.
+
+    Raises ValueError when the client-supplied value is not a number. The
+    comparisons below would otherwise raise TypeError out of handle_subscribe,
+    surfacing as an unhandled exception instead of the error frame every other
+    malformed-input path returns (CORR-113).
+    """
     md = settings.market_data
     if interval is None:
         return md.ws_executor_default_update_interval
+    # bool is an int subclass, so True would otherwise clamp to the floor.
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)):
+        raise ValueError(
+            f"update_interval must be a number, got {type(interval).__name__}"
+        )
     return max(
         md.ws_executor_min_update_interval,
         min(md.ws_executor_max_update_interval, interval),
@@ -134,7 +145,11 @@ class ExecutorWebSocketManager:
             )
             return
 
-        interval = _clamp_interval(msg.get("update_interval"))
+        try:
+            interval = _clamp_interval(msg.get("update_interval"))
+        except ValueError as e:
+            await self._send_error(websocket, str(e))
+            return
 
         # Build subscription
         sub = ExecutorSubscription(

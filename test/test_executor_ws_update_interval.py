@@ -71,6 +71,31 @@ class TestClampIntervalIsConfigurable:
         assert _clamp_interval(3600.0) == 60.0
 
 
+class TestClampIntervalRejectsNonNumbers:
+    """A non-numeric interval must raise ValueError, not TypeError (CORR-113)."""
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["fast", "2", [1.0], {"seconds": 1.0}, (1.0,), object()],
+        ids=["str", "numeric_str", "list", "dict", "tuple", "object"],
+    )
+    def test_non_numeric_interval_is_rejected(self, bad):
+        with pytest.raises(ValueError, match="update_interval must be a number"):
+            _clamp_interval(bad)
+
+    @pytest.mark.parametrize("bad", [True, False], ids=["true", "false"])
+    def test_booleans_are_not_accepted_as_numbers(self, bad):
+        with pytest.raises(ValueError, match="update_interval must be a number"):
+            _clamp_interval(bad)
+
+    def test_the_error_names_the_offending_type(self):
+        with pytest.raises(ValueError, match="got str"):
+            _clamp_interval("fast")
+
+    def test_integers_are_still_valid(self):
+        assert _clamp_interval(5) == 5.0
+
+
 class TestSubscribeAcknowledgement:
     """handle_subscribe must apply and report the configured clamp."""
 
@@ -116,3 +141,45 @@ class TestSubscribeAcknowledgement:
             if call.args[0].get("type") == "subscribed"
         )
         assert ack["update_interval"] == 2.0
+
+
+class TestSubscribeRejectsMalformedInterval:
+    """A malformed interval must come back as an error frame, not an exception."""
+
+    @staticmethod
+    def _manager():
+        executor_service = MagicMock()
+        executor_service.get_executors = AsyncMock(return_value=[])
+        return ExecutorWebSocketManager(
+            executor_service=executor_service,
+            market_data_service=MagicMock(),
+        )
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["fast", ["1"], {"seconds": 1.0}, True],
+        ids=["str", "list", "dict", "bool"],
+    )
+    async def test_malformed_interval_sends_an_error_frame(self, bad):
+        manager = self._manager()
+        websocket = MagicMock()
+        websocket.send_json = AsyncMock()
+
+        await manager.handle_subscribe(
+            "conn-1", websocket, {"type": "executors", "update_interval": bad}
+        )
+
+        frames = [call.args[0] for call in websocket.send_json.call_args_list]
+        assert [f["type"] for f in frames] == ["error"]
+        assert "update_interval" in frames[0]["message"]
+
+    async def test_malformed_interval_does_not_subscribe(self):
+        manager = self._manager()
+        websocket = MagicMock()
+        websocket.send_json = AsyncMock()
+
+        await manager.handle_subscribe(
+            "conn-1", websocket, {"type": "executors", "update_interval": "fast"}
+        )
+
+        assert manager._subscriptions.get("conn-1", {}) == {}
