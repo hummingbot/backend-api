@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import ExecutorOrder, ExecutorRecord, PositionHoldRecord
+from database.repositories.executor_performance_repository import ExecutorPerformanceRepository
 
 
 class ExecutorRepository:
@@ -655,38 +656,56 @@ class ExecutorRepository:
     ) -> int:
         """
         Clean up orphaned executors - those marked as RUNNING but not in active memory.
+
+        Each terminated row takes the metrics of its most recent performance snapshot.
+        A running executor's row carries the zeros it was INSERTed with -- the live
+        figures only exist in ExecutorService memory until it completes -- so terminating
+        it without them booked every executor that was live at a restart at 0 PnL, 0 fees
+        and 0 volume, permanently, and /executors/performance summed those zeros forever.
+        The snapshot series is what makes the real figures recoverable here.
+
+        An executor with no snapshot (created and orphaned inside one snapshot interval)
+        keeps the old behaviour: there is nothing better to write. The adopted figures are
+        the last observed ones rather than the true final ones, which is why the row is
+        still marked SYSTEM_CLEANUP -- a reader can tell an approximated close from a
+        clean one.
+
         Args:
             active_executor_ids: List of executor IDs currently active in memory
             close_type: Close type to set for cleaned up executors
         Returns:
             Number of executors cleaned up
         """
-        from sqlalchemy import update
-
         # Find executors that are RUNNING but not in the active list
         conditions = [ExecutorRecord.status == "RUNNING"]
 
         if active_executor_ids:
             conditions.append(~ExecutorRecord.executor_id.in_(active_executor_ids))
 
-        # First, get the count of orphaned executors for logging
-        count_stmt = select(func.count(ExecutorRecord.id)).where(and_(*conditions))
-        count_result = await self.session.execute(count_stmt)
-        orphaned_count = count_result.scalar() or 0
+        orphaned = (await self.session.execute(
+            select(ExecutorRecord).where(and_(*conditions))
+        )).scalars().all()
 
-        if orphaned_count > 0:
-            # Update orphaned executors to TERMINATED status
-            update_stmt = (
-                update(ExecutorRecord)
-                .where(and_(*conditions))
-                .values(
-                    status="TERMINATED",
-                    close_type=close_type,
-                    closed_at=datetime.now(timezone.utc)
-                )
-            )
+        if not orphaned:
+            return 0
 
-            await self.session.execute(update_stmt)
-            await self.session.flush()
+        latest_snapshots = await ExecutorPerformanceRepository(self.session).get_latest_for(
+            [record.executor_id for record in orphaned]
+        )
 
-        return orphaned_count
+        closed_at = datetime.now(timezone.utc)
+        for record in orphaned:
+            record.status = "TERMINATED"
+            record.close_type = close_type
+            record.closed_at = closed_at
+
+            snapshot = latest_snapshots.get(record.executor_id)
+            if snapshot:
+                record.net_pnl_quote = Decimal(str(snapshot["net_pnl_quote"]))
+                record.net_pnl_pct = Decimal(str(snapshot["net_pnl_pct"]))
+                record.cum_fees_quote = Decimal(str(snapshot["cum_fees_quote"]))
+                record.filled_amount_quote = Decimal(str(snapshot["filled_amount_quote"]))
+
+        await self.session.flush()
+
+        return len(orphaned)

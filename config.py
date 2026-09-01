@@ -261,6 +261,26 @@ class BacktestingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="BACKTESTING_", extra="ignore")
 
 
+class PerformanceSettings(BaseSettings):
+    """Performance snapshot cadence and retention."""
+
+    executor_snapshot_interval: int = Field(
+        default=60,
+        description="How often a live executor's performance is snapshotted, in seconds. "
+                    "Finer than the controller dump because executors are short-lived: at "
+                    "a 5-minute grain a three-minute position executor gets one point."
+    )
+    retention_days: int = Field(
+        default=0,
+        description="Delete performance snapshots (executor AND controller) older than "
+                    "this many days. 0 keeps everything forever, which is what every "
+                    "existing deployment does today -- an upgrade must not start deleting "
+                    "an operator's history."
+    )
+
+    model_config = SettingsConfigDict(env_prefix="PERFORMANCE_", extra="ignore")
+
+
 class Settings(BaseSettings):
     """Combined application settings."""
 
@@ -273,6 +293,7 @@ class Settings(BaseSettings):
     cors: CORSSettings = Field(default_factory=CORSSettings)
     app: AppSettings = Field(default_factory=AppSettings)
     backtesting: BacktestingSettings = Field(default_factory=BacktestingSettings)
+    performance: PerformanceSettings = Field(default_factory=PerformanceSettings)
 
     # Direct banned_tokens field to handle env parsing
     banned_tokens: List[str] = Field(

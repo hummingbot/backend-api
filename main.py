@@ -254,7 +254,9 @@ async def lifespan(app: FastAPI):
         db_manager=db_manager,
         default_account="master_account",
         update_interval=1.0,
-        max_retries=10
+        max_retries=10,
+        performance_snapshot_interval=settings.performance.executor_snapshot_interval,
+        performance_retention_days=settings.performance.retention_days
     )
     logging.info("ExecutorService initialized")
 

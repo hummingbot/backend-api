@@ -27,7 +27,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
-from database.models import ExecutorRecord
+from database.models import ExecutorPerformanceSnapshot, ExecutorRecord
 from database.repositories.executor_repository import ExecutorRepository
 from services.executor_service import ExecutorService
 
@@ -37,8 +37,9 @@ class _AsyncSessionAdapter:
 
     aiosqlite is not installed in this environment, and the repository only ever awaits
     execute/flush/refresh/begin_nested -- so this adapter runs the real SQL against the
-    real schema, including the UNIQUE index on executor_id and the SAVEPOINT the repair
-    insert relies on. Mocking the session away would prove nothing here.
+    real schema, including the UNIQUE index on executor_id and the SAVEPOINTs the repair
+    insert and the terminal performance snapshot rely on. Mocking the session away would
+    prove nothing here.
     """
 
     def __init__(self, session: Session):
@@ -46,6 +47,9 @@ class _AsyncSessionAdapter:
 
     def add(self, obj):
         self._session.add(obj)
+
+    def add_all(self, objs):
+        self._session.add_all(objs)
 
     async def execute(self, statement):
         return self._session.execute(statement)
@@ -84,10 +88,13 @@ class _AsyncSessionAdapter:
 
 @pytest.fixture
 def db():
-    """An in-memory database with the executors table, plus a session factory."""
+    """An in-memory database with the tables the completion path writes, plus a session factory."""
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False},
                            poolclass=StaticPool)
     ExecutorRecord.__table__.create(engine)
+    # Completion also writes the executor's terminal performance snapshot, in this same
+    # transaction (FEAT-001).
+    ExecutorPerformanceSnapshot.__table__.create(engine)
 
     @asynccontextmanager
     async def session_context():
