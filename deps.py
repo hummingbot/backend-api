@@ -1,4 +1,4 @@
-from fastapi import Request
+from fastapi import Depends, HTTPException, Request
 
 from database import AsyncDatabaseManager
 from services.accounts_service import AccountsService
@@ -24,6 +24,20 @@ def get_bots_orchestrator(request: Request) -> BotsOrchestrator:
 def get_accounts_service(request: Request) -> AccountsService:
     """Get AccountsService from app state."""
     return request.app.state.accounts_service
+
+
+GATEWAY_UNAVAILABLE_DETAIL = "Gateway service is not available"
+
+
+async def require_gateway_online(accounts_service: AccountsService = Depends(get_accounts_service)) -> None:
+    """Pre-flight guard for routes that cannot be served at all while Gateway is unreachable.
+
+    Attach per route with ``dependencies=[Depends(require_gateway_online)]``. Deliberately not applied at
+    router level: the container-control routes (``/gateway/start``, ``/gateway/restart``, ...) must answer
+    precisely when Gateway is down, and the DB-backed reads keep serving stored data regardless.
+    """
+    if not await accounts_service.gateway_client.ping():
+        raise HTTPException(status_code=503, detail=GATEWAY_UNAVAILABLE_DETAIL)
 
 
 def get_docker_service(request: Request) -> DockerService:

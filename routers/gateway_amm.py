@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from database import AsyncDatabaseManager
 from database.repositories import GatewayAMMRepository
 from database.repositories.gateway_amm_repository import has_nft_positions
-from deps import get_accounts_service, get_database_manager
+from deps import get_accounts_service, get_database_manager, require_gateway_online
 from models import (
     AMMAddLiquidityRequest,
     AMMCreatePoolRequest,
@@ -61,11 +61,6 @@ AMM_CREATE_POOL_EXTRA_PARAMS_SPEC: ExtraParamsSpec = {
     "configAddress": ((str,), {"meteora"}),
     "ammConfigIndex": ((int,), {"raydium"}),
 }
-
-
-async def _require_gateway(accounts_service: AccountsService) -> None:
-    if not await accounts_service.gateway_client.ping():
-        raise HTTPException(status_code=503, detail="Gateway service is not available")
 
 
 async def _resolve_wallet(accounts_service: AccountsService, network: str, wallet_address) -> str:
@@ -261,7 +256,12 @@ async def _record_failed_event(
         logger.error(f"Error recording failed AMM {event_type}: {db_error}", exc_info=True)
 
 
-@router.get("/amm/pool-info", response_model=AMMPoolInfoResponse, response_model_by_alias=False)
+@router.get(
+    "/amm/pool-info",
+    response_model=AMMPoolInfoResponse,
+    response_model_by_alias=False,
+    dependencies=[Depends(require_gateway_online)],
+)
 async def get_amm_pool_info(
     connector: str,
     network: str,
@@ -270,7 +270,6 @@ async def get_amm_pool_info(
 ):
     """Get AMM pool information (reserves, price, base fee) by pool address."""
     try:
-        await _require_gateway(accounts_service)
         result = check_gateway_error(await accounts_service.gateway_client.amm_pool_info(
             connector=connector, chain_network=network, pool_address=pool_address,
         ))
@@ -286,7 +285,12 @@ async def get_amm_pool_info(
         raise HTTPException(status_code=500, detail=f"Error getting AMM pool info: {str(e)}")
 
 
-@router.get("/amm/position-info", response_model=AMMPositionInfoResponse, response_model_by_alias=False)
+@router.get(
+    "/amm/position-info",
+    response_model=AMMPositionInfoResponse,
+    response_model_by_alias=False,
+    dependencies=[Depends(require_gateway_online)],
+)
 async def get_amm_position_info(
     connector: str,
     network: str,
@@ -296,7 +300,6 @@ async def get_amm_position_info(
 ):
     """Get a wallet's aggregate liquidity in an AMM pool plus a per-position breakdown (DAMM v2)."""
     try:
-        await _require_gateway(accounts_service)
         wallet_address = await _resolve_wallet(accounts_service, network, wallet_address)
         result = check_gateway_error(await accounts_service.gateway_client.amm_position_info(
             connector=connector, chain_network=network, pool_address=pool_address,
@@ -314,7 +317,12 @@ async def get_amm_position_info(
         raise HTTPException(status_code=500, detail=f"Error getting AMM position info: {str(e)}")
 
 
-@router.post("/amm/positions-owned", response_model=List[AMMPositionInfoResponse], response_model_by_alias=False)
+@router.post(
+    "/amm/positions-owned",
+    response_model=List[AMMPositionInfoResponse],
+    response_model_by_alias=False,
+    dependencies=[Depends(require_gateway_online)],
+)
 async def get_amm_positions_owned(
     request: AMMPositionsOwnedRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -326,7 +334,6 @@ async def get_amm_positions_owned(
     them with a 400, surfaced here unchanged. Use position-info with a specific pool address instead.
     """
     try:
-        await _require_gateway(accounts_service)
         wallet_address = await _resolve_wallet(accounts_service, request.network, request.wallet_address)
         result = check_gateway_error(await accounts_service.gateway_client.amm_positions_owned(
             connector=request.connector, chain_network=request.network, wallet_address=wallet_address,
@@ -344,14 +351,18 @@ async def get_amm_positions_owned(
         raise HTTPException(status_code=500, detail=f"Error getting AMM positions owned: {str(e)}")
 
 
-@router.post("/amm/quote-liquidity", response_model=AMMQuoteLiquidityResponse, response_model_by_alias=False)
+@router.post(
+    "/amm/quote-liquidity",
+    response_model=AMMQuoteLiquidityResponse,
+    response_model_by_alias=False,
+    dependencies=[Depends(require_gateway_online)],
+)
 async def quote_amm_liquidity(
     request: AMMQuoteLiquidityRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
 ):
     """Quote a two-sided liquidity deposit."""
     try:
-        await _require_gateway(accounts_service)
         result = check_gateway_error(await accounts_service.gateway_client.amm_quote_liquidity(
             connector=request.connector, chain_network=request.network, pool_address=request.pool_address,
             base_token_amount=float(request.base_token_amount), quote_token_amount=float(request.quote_token_amount),
@@ -371,7 +382,7 @@ async def quote_amm_liquidity(
 
 # ----------------------------- Writes -----------------------------
 
-@router.post("/amm/add-liquidity", response_model=AMMTransactionResponse)
+@router.post("/amm/add-liquidity", response_model=AMMTransactionResponse, dependencies=[Depends(require_gateway_online)])
 async def add_amm_liquidity(
     request: AMMAddLiquidityRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -387,7 +398,6 @@ async def add_amm_liquidity(
     # over the top of Gateway's own error when the wallet lookup is what failed.
     wallet_address = ""
     try:
-        await _require_gateway(accounts_service)
         wallet_address = await _resolve_wallet(accounts_service, request.network, request.wallet_address)
         result = check_gateway_error(await accounts_service.gateway_client.amm_add_liquidity(
             connector=request.connector, chain_network=request.network, wallet_address=wallet_address,
@@ -445,7 +455,7 @@ async def add_amm_liquidity(
         raise HTTPException(status_code=500, detail=f"Error adding AMM liquidity: {str(e)}")
 
 
-@router.post("/amm/remove-liquidity", response_model=AMMTransactionResponse)
+@router.post("/amm/remove-liquidity", response_model=AMMTransactionResponse, dependencies=[Depends(require_gateway_online)])
 async def remove_amm_liquidity(
     request: AMMRemoveLiquidityRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -461,7 +471,6 @@ async def remove_amm_liquidity(
     # over the top of Gateway's own error when the wallet lookup is what failed.
     wallet_address = ""
     try:
-        await _require_gateway(accounts_service)
         wallet_address = await _resolve_wallet(accounts_service, request.network, request.wallet_address)
         result = check_gateway_error(await accounts_service.gateway_client.amm_remove_liquidity(
             connector=request.connector, chain_network=request.network, wallet_address=wallet_address,
@@ -525,7 +534,12 @@ async def remove_amm_liquidity(
         raise HTTPException(status_code=500, detail=f"Error removing AMM liquidity: {str(e)}")
 
 
-@router.post("/amm/create-pool", response_model=AMMCreatePoolResponse, response_model_by_alias=False)
+@router.post(
+    "/amm/create-pool",
+    response_model=AMMCreatePoolResponse,
+    response_model_by_alias=False,
+    dependencies=[Depends(require_gateway_online)],
+)
 async def create_amm_pool(
     request: AMMCreatePoolRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -550,7 +564,6 @@ async def create_amm_pool(
                        "(DAMM v2 pools are created against a config account)."
             )
 
-        await _require_gateway(accounts_service)
         wallet_address = await _resolve_wallet(accounts_service, request.network, request.wallet_address)
         result = check_gateway_error(await accounts_service.gateway_client.amm_create_pool(
             connector=request.connector, chain_network=request.network, wallet_address=wallet_address,

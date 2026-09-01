@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from database import AsyncDatabaseManager
 from database.repositories import GatewaySwapRepository
-from deps import get_accounts_service, get_database_manager
+from deps import get_accounts_service, get_database_manager, require_gateway_online
 from models import SwapExecuteQuoteRequest, SwapExecuteRequest, SwapExecuteResponse, SwapQuoteRequest, SwapQuoteResponse
 from routers.gateway_extras import ExtraParamsSpec, get_transaction_status_from_response, validate_extra_params
 from services.accounts_service import AccountsService
@@ -32,7 +32,7 @@ SWAP_EXTRA_PARAMS_SPEC: ExtraParamsSpec = {
 }
 
 
-@router.post("/swap/quote", response_model=SwapQuoteResponse)
+@router.post("/swap/quote", response_model=SwapQuoteResponse, dependencies=[Depends(require_gateway_online)])
 async def get_swap_quote(
     request: SwapQuoteRequest,
     accounts_service: AccountsService = Depends(get_accounts_service)
@@ -55,9 +55,6 @@ async def get_swap_quote(
     try:
         validate_extra_params(request.extra_params, SWAP_EXTRA_PARAMS_SPEC,
                               request.connector, "/trading/{router,clmm,amm}/quote-swap")
-
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         # Parse trading pair
         base, quote = split_trading_pair(request.trading_pair)
@@ -242,7 +239,7 @@ async def _record_and_report_swap(
     )
 
 
-@router.post("/swap/execute", response_model=SwapExecuteResponse)
+@router.post("/swap/execute", response_model=SwapExecuteResponse, dependencies=[Depends(require_gateway_online)])
 async def execute_swap(
     request: SwapExecuteRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -267,9 +264,6 @@ async def execute_swap(
     try:
         validate_extra_params(request.extra_params, SWAP_EXTRA_PARAMS_SPEC,
                               request.connector, "/trading/{router,clmm,amm}/execute-swap")
-
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         # Parse network_id (chain needed for wallet lookup)
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
@@ -352,7 +346,7 @@ async def get_swap_status(
         raise HTTPException(status_code=500, detail=f"Error getting swap status: {str(e)}")
 
 
-@router.post("/swap/execute-quote", response_model=SwapExecuteResponse)
+@router.post("/swap/execute-quote", response_model=SwapExecuteResponse, dependencies=[Depends(require_gateway_online)])
 async def execute_swap_quote(
     request: SwapExecuteQuoteRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -378,9 +372,6 @@ async def execute_swap_quote(
         Transaction hash and what the swap actually moved
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
         wallet_address = await accounts_service.gateway_client.get_wallet_address_or_default(
             chain=chain,

@@ -3,7 +3,7 @@ from typing import Dict, List
 from fastapi import APIRouter, Depends, HTTPException
 from starlette import status
 
-from deps import get_accounts_service
+from deps import get_accounts_service, require_gateway_online
 from models import GatewayWalletCredential, SetDefaultWalletRequest
 from services.accounts_service import AccountsService, validate_safe_name
 
@@ -93,7 +93,11 @@ async def delete_account(account_name: str, accounts_service: AccountsService = 
 
 
 @router.post("/delete-credential/{account_name}/{connector_name}")
-async def delete_credential(account_name: str, connector_name: str, accounts_service: AccountsService = Depends(get_accounts_service)):
+async def delete_credential(
+    account_name: str,
+    connector_name: str,
+    accounts_service: AccountsService = Depends(get_accounts_service),
+):
     """
     Delete a specific connector credential for an account.
 
@@ -115,7 +119,12 @@ async def delete_credential(account_name: str, connector_name: str, accounts_ser
 
 
 @router.post("/add-credential/{account_name}/{connector_name}", status_code=status.HTTP_201_CREATED)
-async def add_credential(account_name: str, connector_name: str, credentials: Dict, accounts_service: AccountsService = Depends(get_accounts_service)):
+async def add_credential(
+    account_name: str,
+    connector_name: str,
+    credentials: Dict,
+    accounts_service: AccountsService = Depends(get_accounts_service),
+):
     """
     Add or update connector credentials (API keys) for a specific account and connector.
 
@@ -195,7 +204,7 @@ async def add_gateway_wallet(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/gateway/wallet/set-default")
+@router.post("/gateway/wallet/set-default", dependencies=[Depends(require_gateway_online)])
 async def set_default_gateway_wallet(
     request: SetDefaultWalletRequest,
     accounts_service: AccountsService = Depends(get_accounts_service)
@@ -219,9 +228,6 @@ async def set_default_gateway_wallet(
     }
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         result = await accounts_service.gateway_client.set_default_wallet(
             chain=request.chain,
             address=request.address

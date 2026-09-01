@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from database import AsyncDatabaseManager
 from database.repositories import GatewayCLMMRepository
-from deps import get_accounts_service, get_database_manager
+from deps import GATEWAY_UNAVAILABLE_DETAIL, get_accounts_service, get_database_manager, require_gateway_online
 from models import (
     AMMCreatePoolResponse,
     CLMMAddLiquidityRequest,
@@ -207,7 +207,12 @@ async def _record_failed_write(
         logger.error(f"Error recording failed CLMM {event_type}: {db_error}", exc_info=True)
 
 
-@router.get("/clmm/pool-info", response_model=CLMMPoolInfoResponse, response_model_by_alias=False)
+@router.get(
+    "/clmm/pool-info",
+    response_model=CLMMPoolInfoResponse,
+    response_model_by_alias=False,
+    dependencies=[Depends(require_gateway_online)],
+)
 async def get_clmm_pool_info(
     connector: str,
     network: str,
@@ -236,9 +241,6 @@ async def get_clmm_pool_info(
 
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Get pool info from Gateway's unified CLMM endpoint
         result = check_gateway_error(await accounts_service.gateway_client.clmm_pool_info(
             connector=connector,
@@ -424,7 +426,7 @@ async def get_clmm_pools(
         raise HTTPException(status_code=500, detail=f"Error getting CLMM pools: {str(e)}")
 
 
-@router.post("/clmm/open", response_model=CLMMOpenPositionResponse)
+@router.post("/clmm/open", response_model=CLMMOpenPositionResponse, dependencies=[Depends(require_gateway_online)])
 async def open_clmm_position(
     request: CLMMOpenPositionRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -453,9 +455,6 @@ async def open_clmm_position(
     try:
         validate_extra_params(request.extra_params, CLMM_LIQUIDITY_EXTRA_PARAMS_SPEC,
                               request.connector, "unified /trading/clmm/open")
-
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         # Parse network_id
         chain, _ = accounts_service.gateway_client.parse_network_id(request.network)
@@ -651,7 +650,7 @@ async def open_clmm_position(
         raise HTTPException(status_code=500, detail=f"Error opening CLMM position: {str(e)}")
 
 
-@router.post("/clmm/add")
+@router.post("/clmm/add", dependencies=[Depends(require_gateway_online)])
 async def add_liquidity_to_clmm_position(
     request: CLMMAddLiquidityRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -676,9 +675,6 @@ async def add_liquidity_to_clmm_position(
     try:
         validate_extra_params(request.extra_params, CLMM_LIQUIDITY_EXTRA_PARAMS_SPEC,
                               request.connector, "unified /trading/clmm/add")
-
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         # Parse network_id
         chain, _ = accounts_service.gateway_client.parse_network_id(request.network)
@@ -809,7 +805,7 @@ async def add_liquidity_to_clmm_position(
         raise HTTPException(status_code=500, detail=f"Error adding liquidity to CLMM position: {str(e)}")
 
 
-@router.post("/clmm/remove")
+@router.post("/clmm/remove", dependencies=[Depends(require_gateway_online)])
 async def remove_liquidity_from_clmm_position(
     request: CLMMRemoveLiquidityRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -830,9 +826,6 @@ async def remove_liquidity_from_clmm_position(
         Transaction hash
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id
         chain, _ = accounts_service.gateway_client.parse_network_id(request.network)
 
@@ -936,7 +929,7 @@ async def remove_liquidity_from_clmm_position(
         raise HTTPException(status_code=500, detail=f"Error removing liquidity from CLMM position: {str(e)}")
 
 
-@router.post("/clmm/close", response_model=CLMMClosePositionResponse)
+@router.post("/clmm/close", response_model=CLMMClosePositionResponse, dependencies=[Depends(require_gateway_online)])
 async def close_clmm_position(
     request: CLMMClosePositionRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -955,9 +948,6 @@ async def close_clmm_position(
         Transaction hash and collected fee amounts
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id
         chain, _ = accounts_service.gateway_client.parse_network_id(request.network)
 
@@ -1172,7 +1162,7 @@ async def close_clmm_position(
         raise HTTPException(status_code=500, detail=f"Error closing CLMM position: {str(e)}")
 
 
-@router.post("/clmm/collect-fees", response_model=CLMMCollectFeesResponse)
+@router.post("/clmm/collect-fees", response_model=CLMMCollectFeesResponse, dependencies=[Depends(require_gateway_online)])
 async def collect_fees_from_clmm_position(
     request: CLMMCollectFeesRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
@@ -1191,9 +1181,6 @@ async def collect_fees_from_clmm_position(
         Transaction hash and collected fee amounts
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id
         chain, _ = accounts_service.gateway_client.parse_network_id(request.network)
 
@@ -1340,7 +1327,7 @@ async def collect_fees_from_clmm_position(
         raise HTTPException(status_code=500, detail=f"Error collecting fees: {str(e)}")
 
 
-@router.post("/clmm/positions_owned", response_model=List[CLMMPositionInfo])
+@router.post("/clmm/positions_owned", response_model=List[CLMMPositionInfo], dependencies=[Depends(require_gateway_online)])
 async def get_clmm_positions_owned(
     request: CLMMPositionsOwnedRequest,
     accounts_service: AccountsService = Depends(get_accounts_service)
@@ -1362,9 +1349,6 @@ async def get_clmm_positions_owned(
         List of CLMM position information
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id
         chain, network = accounts_service.gateway_client.parse_network_id(request.network)
 
@@ -1437,7 +1421,12 @@ async def get_clmm_positions_owned(
         raise HTTPException(status_code=500, detail=f"Error getting CLMM positions owned: {str(e)}")
 
 
-@router.post("/clmm/quote-position", response_model=CLMMQuotePositionResponse, response_model_by_alias=False)
+@router.post(
+    "/clmm/quote-position",
+    response_model=CLMMQuotePositionResponse,
+    response_model_by_alias=False,
+    dependencies=[Depends(require_gateway_online)],
+)
 async def quote_clmm_position(
     request: CLMMQuotePositionRequest,
     accounts_service: AccountsService = Depends(get_accounts_service)
@@ -1450,9 +1439,6 @@ async def quote_clmm_position(
     (and which side limits it), without signing or submitting anything.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         result = check_gateway_error(await accounts_service.gateway_client.clmm_quote_position(
             connector=request.connector,
             chain_network=request.network,
@@ -1476,7 +1462,12 @@ async def quote_clmm_position(
         raise HTTPException(status_code=500, detail=f"Error quoting CLMM position: {str(e)}")
 
 
-@router.post("/clmm/create-pool", response_model=AMMCreatePoolResponse, response_model_by_alias=False)
+@router.post(
+    "/clmm/create-pool",
+    response_model=AMMCreatePoolResponse,
+    response_model_by_alias=False,
+    dependencies=[Depends(require_gateway_online)],
+)
 async def create_clmm_pool(
     request: CLMMCreatePoolRequest,
     accounts_service: AccountsService = Depends(get_accounts_service)
@@ -1491,9 +1482,6 @@ async def create_clmm_pool(
     try:
         validate_extra_params(request.extra_params, CLMM_CREATE_POOL_EXTRA_PARAMS_SPEC,
                               request.connector, "unified /trading/clmm/create-pool")
-
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         chain, _ = accounts_service.gateway_client.parse_network_id(request.network)
         wallet_address = await accounts_service.gateway_client.get_wallet_address_or_default(
@@ -1526,7 +1514,7 @@ async def create_clmm_pool(
         raise HTTPException(status_code=500, detail=f"Error creating CLMM pool: {str(e)}")
 
 
-@router.get("/clmm/position-info", response_model=CLMMPositionInfo)
+@router.get("/clmm/position-info", response_model=CLMMPositionInfo, dependencies=[Depends(require_gateway_online)])
 async def get_clmm_position_info(
     connector: str,
     network: str,
@@ -1540,9 +1528,6 @@ async def get_clmm_position_info(
     or closed position as an error (500/404), surfaced here as 404.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         pos = await accounts_service.gateway_client.clmm_position_info(
             connector=connector,
             chain_network=network,
@@ -1550,7 +1535,7 @@ async def get_clmm_position_info(
         )
         if pos is None or not isinstance(pos, dict):
             # Connection error: the client returns None — a 503, not a crash.
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
+            raise HTTPException(status_code=503, detail=GATEWAY_UNAVAILABLE_DETAIL)
         if "error" in pos:
             status_code = pos.get("status")
             if status_code in (404, 500):
