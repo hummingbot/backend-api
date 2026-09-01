@@ -627,3 +627,51 @@ deleting from both tables only past the cutoff. All 26 passed.
   repository re-implements the sampler with a grain parameter rather than generalizing the
   old one, because the old one is on a wire-compatible path that this feature must not
   touch. Collapsing the two is a fair follow-up once the new route has consumers.
+
+
+## Addendum: `GET /performance/latest` (added after close)
+
+The feature as shipped replaced only half of the old surface. `/bot-orchestration/`
+carries **two** controller routes -- `-history` and `-latest` -- and `/performance/history`
+answered only the first, so a consumer could migrate its charts but still had to call the
+old route for current values. That is not a migration a client can finish, which was the
+objective. `/performance/latest` closes it.
+
+- **`ExecutorPerformanceRepository.get_latest(...)`** -- the executor counterpart of
+  `ControllerPerformanceRepository.get_latest_performance`, with the same
+  max-timestamp-per-scope subquery. Two differences the population forces: it orders
+  newest-first and takes a `limit`, because every executor that ever ran leaves a terminal
+  row behind and the unfiltered "latest per scope" therefore grows without bound in a way
+  the controller one does not. Filters go on the grouped subquery, not the join, so they
+  decide what is aggregated rather than discarding it afterwards.
+- **The route reads the stored series, not memory.** A live executor's row is up to one
+  interval stale and an executor younger than one interval does not appear -- deliberate,
+  so `/latest`'s row and the newest row of `/history` are the *same row*. Pinned by
+  `test_it_shares_the_row_shape_with_the_history_route`, and verified against the deployed
+  API: the two responses are byte-identical. Live in-memory figures remain `/executors/`.
+- **A closed executor's latest row is its terminal row**, carrying `is_terminal` and
+  `close_type`, so "the final value" needs no second call -- the same property that made
+  the terminal row worth writing in the first place.
+- **The controller branch calls `get_latest_controller_performance` unchanged**, the same
+  method the wire-compatible route calls. It only narrows by `bot_name`, so `controller_id`
+  and the `limit` are applied in the route, over a result that is one row per
+  (bot, controller) and small by construction. The rows are sorted newest-first before the
+  limit is applied, because that method returns join order and an unsorted `limit` would
+  truncate an arbitrary set of scopes.
+- **The cross-subject filter check is now one shared helper** (`_reject_foreign_filters`),
+  so the two routes cannot drift into disagreeing about which filter belongs to which
+  population.
+- **No pagination block** on the response: one row per scope is not a series, so there is
+  no cursor to walk and no interval to sample. `limit` is a cap on scopes, not a page.
+
+20 tests added (`TestTheLatestQuery`, `TestTheLatestRoute`); the file goes 43 -> 63 and the
+suite 537 -> 557 passing, with the 82 pre-existing async failures unchanged.
+
+**Still not a full migration, and deliberately so.** The old routes stay: wire
+compatibility is absolute and pinned by tests, so consumers move when they choose. What
+remains outside this repo is Condor/MCP/dashboard switching over. Two things a consumer
+should know before it does: `subject=executor` covers only in-process `ExecutorService`
+executors -- a Docker bot's individual executors are not in this API's memory or database
+and never will be served here -- and `PERFORMANCE_RETENTION_DAYS` still defaults to `0`
+(keep forever), which is the right default for an upgrade but a decision an operator
+running executors at scale has to revisit.
