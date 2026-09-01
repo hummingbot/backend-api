@@ -64,6 +64,9 @@ class ExecutorSubscription:
     last_sent_hash: Optional[str] = None
     # For logs: track count to send only new entries
     last_log_count: int = 0
+    # Whether the client has already been told this channel is failing, so a
+    # persistent fault sends one error frame instead of one per interval.
+    error_notified: bool = False
 
 
 # A fetcher turns a subscription into the payload to hash and push; an extra
@@ -322,6 +325,7 @@ class ExecutorWebSocketManager:
             while True:
                 try:
                     data = await fetch(sub)
+                    sub.error_notified = False
                     h = _compute_hash(data)
                     if h != sub.last_sent_hash:
                         sub.last_sent_hash = h
@@ -337,6 +341,19 @@ class ExecutorWebSocketManager:
                             break
                 except Exception as e:
                     logger.error(f"[WS-Exec] {msg_type} push error: {e}", exc_info=True)
+                    # Tell the subscriber the channel is failing. Staying silent leaves
+                    # the last good frame on screen with nothing marking it stale, and
+                    # a fetch that degrades to zeroes instead of raising would render as
+                    # real data (see get_performance_report, CORR-111).
+                    if not sub.error_notified:
+                        sub.error_notified = True
+                        # The recovery frame must be sent even if the payload is
+                        # byte-identical to the one that preceded the outage.
+                        sub.last_sent_hash = None
+                        if not await self._send_or_stop(
+                            conn_id, websocket, sub, msg_type, self._error_frame(sub, msg_type, e)
+                        ):
+                            break
                 await asyncio.sleep(sub.update_interval)
         except asyncio.CancelledError:
             pass
@@ -510,6 +527,23 @@ class ExecutorWebSocketManager:
                 f"[WS-Exec] {conn_id} disconnected, stopping {msg_type} push [{sub.sub_id}]"
             )
             return False
+
+    @staticmethod
+    def _error_frame(
+        sub: ExecutorSubscription, msg_type: str, error: Exception
+    ) -> Dict[str, Any]:
+        """The frame a push loop sends when its fetch failed.
+
+        Carries the subscription and channel so a client showing several
+        subscriptions can mark the right one as failing rather than stale.
+        """
+        return {
+            "type": "error",
+            "subscription_id": sub.sub_id,
+            "channel": msg_type,
+            "message": f"{msg_type} update failed: {error}",
+            "timestamp": time.time(),
+        }
 
     @staticmethod
     async def _send_error(websocket: WebSocket, message: str) -> None:

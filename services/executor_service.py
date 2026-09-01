@@ -1479,31 +1479,33 @@ class ExecutorService:
         }
 
         if self.db_manager:
-            try:
-                async with self.db_manager.get_session_context() as session:
-                    repo = ExecutorRepository(session)
-                    db_data = await repo.get_performance_report(controller_id=controller_id)
+            # No try/except here on purpose: a database outage used to be swallowed and
+            # reported as the zeroed report below, making it indistinguishable from
+            # "no executors yet" to every consumer -- the route answered 200 with zeroes
+            # and the /ws/executors performance channel pushed a confident row of them.
+            # The failure now propagates: the route turns it into a 500 and the push loop
+            # sends an error frame. The zeroed report is left to mean an empty dataset.
+            async with self.db_manager.get_session_context() as session:
+                repo = ExecutorRepository(session)
+                db_data = await repo.get_performance_report(controller_id=controller_id)
 
-                report["total_executors"] = db_data["total_executors"]
-                report["by_status"] = db_data["status_counts"]
-                report["pnl_total_quote"] = db_data["pnl_total_quote"]
-                report["pnl_pct_avg"] = db_data["pnl_pct_avg"]
-                report["fees_total_quote"] = db_data["fees_total_quote"]
-                report["volume_total_quote"] = db_data["volume_total_quote"]
-                report["win_rate"] = db_data["win_rate"]
-                report["by_type"] = db_data["by_type"]
+            report["total_executors"] = db_data["total_executors"]
+            report["by_status"] = db_data["status_counts"]
+            report["pnl_total_quote"] = db_data["pnl_total_quote"]
+            report["pnl_pct_avg"] = db_data["pnl_pct_avg"]
+            report["fees_total_quote"] = db_data["fees_total_quote"]
+            report["volume_total_quote"] = db_data["volume_total_quote"]
+            report["win_rate"] = db_data["win_rate"]
+            report["by_type"] = db_data["by_type"]
 
-                # Sharpe ratio: mean(pnl) / std(pnl). The repository returns the sample
-                # standard deviation as an aggregate -- None below 2 completed executors --
-                # so this never depends on the number of rows in the table.
-                pnl_std = db_data["pnl_std"]
-                completed_count = db_data["completed_count"]
-                if pnl_std:  # None below 2 executors, 0.0 when every PnL is identical
-                    mean_pnl = db_data["pnl_total_quote"] / completed_count
-                    report["sharpe_ratio"] = round(mean_pnl / pnl_std, 4)
-
-            except Exception as e:
-                logger.error(f"Error generating performance report: {e}", exc_info=True)
+            # Sharpe ratio: mean(pnl) / std(pnl). The repository returns the sample
+            # standard deviation as an aggregate -- None below 2 completed executors --
+            # so this never depends on the number of rows in the table.
+            pnl_std = db_data["pnl_std"]
+            completed_count = db_data["completed_count"]
+            if pnl_std:  # None below 2 executors, 0.0 when every PnL is identical
+                mean_pnl = db_data["pnl_total_quote"] / completed_count
+                report["sharpe_ratio"] = round(mean_pnl / pnl_std, 4)
 
         # --- Unrealized PnL from active executors ---
         unrealized_pnl = 0.0

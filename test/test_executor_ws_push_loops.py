@@ -359,7 +359,12 @@ class TestChangeDetection:
 
 
 class TestErrorHandling:
-    """A failing fetch is logged per channel and the loop keeps polling."""
+    """A failing fetch is logged per channel and the loop keeps polling.
+
+    Since CORR-111 the generic loop also pushes one `error` frame before it
+    retries, so the client is told the channel is failing; `executor_logs` keeps
+    its own loop and still only logs. See test_performance_report_reports_db_failure.py.
+    """
 
     @pytest.mark.parametrize(
         "sub_type,attr,is_async",
@@ -384,11 +389,14 @@ class TestErrorHandling:
         websocket = RecordingWebSocket()
         sub = make_sub(sub_type, executor_id="e-1")
 
-        with caplog.at_level("ERROR"):
-            await run_loop(manager, sub_type, sub, websocket, frames=1)
+        # Every generic channel emits an error frame first, then the recovery frame.
+        expected_frames = 1 if sub_type == "executor_logs" else 2
 
-        assert websocket.sent, "the loop did not recover after the failing poll"
-        assert websocket.sent[0]["type"] == sub_type
+        with caplog.at_level("ERROR"):
+            await run_loop(manager, sub_type, sub, websocket, frames=expected_frames)
+
+        assert websocket.data_frames(), "the loop did not recover after the failing poll"
+        assert websocket.data_frames()[0]["type"] == sub_type
         assert f"[WS-Exec] {sub_type} push error" in caplog.text
 
     async def test_an_orchestrator_failure_is_logged_under_its_own_channel(self, caplog):
@@ -400,10 +408,10 @@ class TestErrorHandling:
         sub = make_sub("all_bots_status")
 
         with caplog.at_level("ERROR"):
-            await run_loop(manager, "all_bots_status", sub, websocket, frames=1)
+            await run_loop(manager, "all_bots_status", sub, websocket, frames=2)
 
         assert "[WS-Exec] all_bots_status push error" in caplog.text
-        assert websocket.sent[0]["type"] == "all_bots_status"
+        assert websocket.data_frames()[0]["type"] == "all_bots_status"
 
 
 class TestDisconnectStopsTheLoop:
