@@ -1004,25 +1004,39 @@ class UnifiedConnectorService:
         orders_to_remove = []
 
         try:
-            # Single session/transaction per connector: one SELECT per order and one commit on context exit.
+            # Single session/transaction per connector: one batched SELECT for the whole book,
+            # one flush for the statuses that actually moved, and one commit on context exit.
             async with self.db_manager.get_session_context() as session:
                 order_repo = OrderRepository(session)
 
-                for client_order_id, order in list(connector.in_flight_orders.items()):
+                in_flight_orders = list(connector.in_flight_orders.items())
+                db_orders = await order_repo.get_orders_by_client_ids(
+                    [client_order_id for client_order_id, _ in in_flight_orders]
+                )
+                db_orders_by_client_id = {
+                    db_order.client_order_id: db_order for db_order in db_orders
+                }
+
+                status_changed = False
+                for client_order_id, order in in_flight_orders:
                     try:
-                        db_order = await order_repo.get_order_by_client_id(client_order_id)
+                        # Orders held in memory but absent from the DB are simply skipped.
+                        db_order = db_orders_by_client_id.get(client_order_id)
 
                         if db_order:
                             new_status = self._map_order_state_to_status(order.current_state)
                             if db_order.status != new_status:
                                 db_order.status = new_status
-                                await session.flush()
+                                status_changed = True
 
                         if order.current_state in terminal_states:
                             orders_to_remove.append(client_order_id)
 
                     except Exception as e:
                         logger.error(f"Error syncing order {client_order_id}: {e}")
+
+                if status_changed:
+                    await session.flush()
 
         except Exception as e:
             logger.error(f"Error syncing orders for {account_name}/{connector_name}: {e}")

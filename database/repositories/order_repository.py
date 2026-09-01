@@ -9,6 +9,10 @@ from database.models import Order
 
 
 class OrderRepository:
+    # Client order ids are batched into `IN (...)` clauses of at most this size so a
+    # connector with a very large book does not build an unbounded bind-parameter list.
+    CLIENT_ID_CHUNK_SIZE = 500
+
     def __init__(self, session: AsyncSession):
         self.session = session
 
@@ -26,6 +30,27 @@ class OrderRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_orders_by_client_ids(self, client_order_ids: List[str]) -> List[Order]:
+        """Get the orders matching a batch of client order IDs.
+
+        Batched sibling of `get_order_by_client_id`: one query per `CLIENT_ID_CHUNK_SIZE`
+        ids instead of one round trip per id. Ids with no row are simply absent from the
+        result; no status filter is applied, so rows already in a terminal state come back
+        too and can still be corrected.
+        """
+        if not client_order_ids:
+            return []
+
+        orders: List[Order] = []
+        ids = list(client_order_ids)
+        for start in range(0, len(ids), self.CLIENT_ID_CHUNK_SIZE):
+            chunk = ids[start:start + self.CLIENT_ID_CHUNK_SIZE]
+            result = await self.session.execute(
+                select(Order).where(Order.client_order_id.in_(chunk))
+            )
+            orders.extend(result.scalars().all())
+        return orders
+
     async def update_order_status(self, client_order_id: str, status: str,
                                   error_message: Optional[str] = None) -> Optional[Order]:
         """Update order status and optional error message."""
@@ -38,8 +63,8 @@ class OrderRepository:
         return order
 
     async def update_order_fill(self, client_order_id: str, filled_amount: Decimal,
-                              average_fill_price: Decimal, fee_paid: Decimal = None,
-                              fee_currency: str = None, exchange_order_id: str = None) -> Optional[Order]:
+                                average_fill_price: Decimal, fee_paid: Decimal = None,
+                                fee_currency: str = None, exchange_order_id: str = None) -> Optional[Order]:
         """Update order with fill information."""
         result = await self.session.execute(
             select(Order).where(Order.client_order_id == client_order_id)
@@ -49,10 +74,10 @@ class OrderRepository:
             # Add to existing filled amount instead of replacing
             previous_filled = Decimal(str(order.filled_amount or 0))
             order.filled_amount = float(previous_filled + filled_amount)
-            
+
             # Update average price (simplified - use latest fill price)
             order.average_fill_price = float(average_fill_price)
-            
+
             # Add to existing fees
             if fee_paid is not None:
                 previous_fee = Decimal(str(order.fee_paid or 0))
@@ -61,27 +86,27 @@ class OrderRepository:
                 order.fee_currency = fee_currency
             if exchange_order_id:
                 order.exchange_order_id = exchange_order_id
-            
+
             # Update status based on total filled amount
             total_filled = Decimal(str(order.filled_amount))
             if total_filled >= Decimal(str(order.amount)):
                 order.status = "FILLED"
             elif total_filled > 0:
                 order.status = "PARTIALLY_FILLED"
-            
+
             await self.session.flush()
         return order
 
-    async def get_orders(self, account_name: Optional[str] = None, 
-                        connector_name: Optional[str] = None,
-                        trading_pair: Optional[str] = None, 
-                        status: Optional[str] = None,
-                        start_time: Optional[int] = None, 
-                        end_time: Optional[int] = None,
-                        limit: int = 100, offset: int = 0) -> List[Order]:
+    async def get_orders(self, account_name: Optional[str] = None,
+                         connector_name: Optional[str] = None,
+                         trading_pair: Optional[str] = None,
+                         status: Optional[str] = None,
+                         start_time: Optional[int] = None,
+                         end_time: Optional[int] = None,
+                         limit: int = 100, offset: int = 0) -> List[Order]:
         """Get orders with filtering and pagination."""
         query = select(Order)
-        
+
         # Apply filters
         if account_name:
             query = query.where(Order.account_name == account_name)
@@ -97,22 +122,22 @@ class OrderRepository:
         if end_time:
             end_dt = datetime.fromtimestamp(end_time / 1000)
             query = query.where(Order.created_at <= end_dt)
-        
+
         # Apply ordering and pagination
         query = query.order_by(Order.created_at.desc())
         query = query.limit(limit).offset(offset)
-        
+
         result = await self.session.execute(query)
         return result.scalars().all()
 
     async def get_active_orders(self, account_name: Optional[str] = None,
-                              connector_name: Optional[str] = None,
-                              trading_pair: Optional[str] = None) -> List[Order]:
+                                connector_name: Optional[str] = None,
+                                trading_pair: Optional[str] = None) -> List[Order]:
         """Get active orders (SUBMITTED, OPEN, PARTIALLY_FILLED, PENDING_CANCEL)."""
         query = select(Order).where(
             Order.status.in_(["SUBMITTED", "OPEN", "PARTIALLY_FILLED", "PENDING_CANCEL"])
         )
-        
+
         # Apply filters
         if account_name:
             query = query.where(Order.account_name == account_name)
@@ -120,15 +145,15 @@ class OrderRepository:
             query = query.where(Order.connector_name == connector_name)
         if trading_pair:
             query = query.where(Order.trading_pair == trading_pair)
-        
+
         query = query.order_by(Order.created_at.desc()).limit(1000)
-        
+
         result = await self.session.execute(query)
         return result.scalars().all()
 
     async def get_orders_summary(self, account_name: Optional[str] = None,
-                               start_time: Optional[int] = None,
-                               end_time: Optional[int] = None) -> Dict:
+                                 start_time: Optional[int] = None,
+                                 end_time: Optional[int] = None) -> Dict:
         """Get order summary statistics using a single DB-level aggregate query."""
         query = select(Order.status, func.count()).group_by(Order.status)
 
