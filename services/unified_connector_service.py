@@ -1095,53 +1095,78 @@ class UnifiedConnectorService:
 
                 # Snapshot tracked orders (the set was loaded from the DB at init).
                 tracked_orders = list(connector.in_flight_orders.values())
-                # Single session/transaction per connector: every reconciled status update is
-                # flushed into one shared session and committed once on context exit. Each
-                # order's write runs inside its own savepoint so a SQLAlchemy error on one
-                # order is rolled back in isolation and does not poison the rest.
-                async with self.db_manager.get_session_context() as session:
-                    order_repo = OrderRepository(session)
-                    for order in tracked_orders:
-                        client_order_id = order.client_order_id
-                        note = None
-                        try:
-                            order_update = await connector._request_order_status(order)
-                            new_state = order_update.new_state
-                        except Exception as exc:
-                            if connector._is_order_not_found_during_status_update_error(exc):
-                                # The exchange does not know this order -> it is gone.
-                                new_state = OrderState.CANCELED
-                                note = "Reconciled on startup: order not found on exchange"
-                            else:
-                                # Transient/unknown error - do not touch the order.
-                                logger.warning(
-                                    f"Could not verify order {client_order_id} on "
-                                    f"{account_name}/{connector_name}: {exc}"
-                                )
-                                summary["unverified"] += 1
-                                continue
+                # Orders whose real state the exchange confirmed, as (client_order_id, state).
+                # Tracking is only updated once the transaction has committed.
+                resolved_orders = []
+                unverified = 0
+                try:
+                    # Single session/transaction per connector: one batched SELECT for the whole
+                    # tracked book, one flush for the statuses that actually moved, and one
+                    # commit on context exit.
+                    async with self.db_manager.get_session_context() as session:
+                        order_repo = OrderRepository(session)
+                        db_orders = await order_repo.get_orders_by_client_ids(
+                            [order.client_order_id for order in tracked_orders]
+                        )
+                        db_orders_by_client_id = {
+                            db_order.client_order_id: db_order for db_order in db_orders
+                        }
 
-                        db_status = self._map_order_state_to_status(new_state)
-                        try:
-                            async with session.begin_nested():
-                                await order_repo.update_order_status(
-                                    client_order_id=client_order_id,
-                                    status=db_status,
-                                    error_message=note,
-                                )
-                        except Exception as exc:
-                            # Savepoint rolled back: this order failed to persist but the
-                            # session stays usable for the remaining orders.
-                            logger.error(f"Failed to persist reconciled order {client_order_id}: {exc}")
-                            summary["unverified"] += 1
-                            continue
+                        status_changed = False
+                        for order in tracked_orders:
+                            client_order_id = order.client_order_id
+                            note = None
+                            try:
+                                order_update = await connector._request_order_status(order)
+                                new_state = order_update.new_state
+                            except Exception as exc:
+                                if connector._is_order_not_found_during_status_update_error(exc):
+                                    # The exchange does not know this order -> it is gone.
+                                    new_state = OrderState.CANCELED
+                                    note = "Reconciled on startup: order not found on exchange"
+                                else:
+                                    # Transient/unknown error - do not touch the order.
+                                    logger.warning(
+                                        f"Could not verify order {client_order_id} on "
+                                        f"{account_name}/{connector_name}: {exc}"
+                                    )
+                                    unverified += 1
+                                    continue
 
-                        if new_state in terminal_states:
-                            connector.in_flight_orders.pop(client_order_id, None)
-                            summary["reconciled_terminal"] += 1
-                        else:
-                            # Keep tracking so it stays cancelable via the trading endpoints.
-                            summary["still_open"] += 1
+                            db_status = self._map_order_state_to_status(new_state)
+                            # Orders tracked in memory but absent from the DB have no row to
+                            # correct; they are still reconciled against the exchange.
+                            db_order = db_orders_by_client_id.get(client_order_id)
+                            if db_order is not None:
+                                if db_order.status != db_status:
+                                    db_order.status = db_status
+                                    status_changed = True
+                                if note and db_order.error_message != note:
+                                    db_order.error_message = note
+                                    status_changed = True
+
+                            resolved_orders.append((client_order_id, new_state))
+
+                        if status_changed:
+                            await session.flush()
+                except Exception as exc:
+                    # The whole batch failed to persist: nothing is untracked and every order
+                    # stays as it was, to be reconciled again on the next startup.
+                    logger.error(
+                        f"Failed to persist reconciled orders for "
+                        f"{account_name}/{connector_name}: {exc}"
+                    )
+                    summary["unverified"] += len(tracked_orders)
+                    continue
+
+                summary["unverified"] += unverified
+                for client_order_id, new_state in resolved_orders:
+                    if new_state in terminal_states:
+                        connector.in_flight_orders.pop(client_order_id, None)
+                        summary["reconciled_terminal"] += 1
+                    else:
+                        # Keep tracking so it stays cancelable via the trading endpoints.
+                        summary["still_open"] += 1
 
         logger.info(
             "Order reconciliation complete: "
