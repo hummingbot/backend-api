@@ -98,6 +98,14 @@ class BacktestingService:
     def __init__(self, max_results: Optional[int] = None, results_path: Optional[str] = None):
         self._tasks: "OrderedDict[str, BacktestTask]" = OrderedDict()
         self._engine = BacktestingEngineBase()
+        # One engine is shared so its BacktestingDataProvider keeps caching downloaded candles
+        # across runs, but run_backtesting mutates that engine in place -- the time window, the
+        # controller, the resolution and the per-run accumulators all live on self -- and then
+        # suspends for seconds on the historical candle download. Two runs interleaving there
+        # resume against each other's state and return silently wrong numbers, so the engine is
+        # lent to one backtest at a time. Everything run_backtesting returns is rebound per run,
+        # so a result stays valid once the lock is released.
+        self._engine_lock = asyncio.Lock()
         self._max_results = max_results if max_results is not None else settings.backtesting.max_results
         self._results_dir = Path(results_path if results_path is not None else settings.backtesting.results_path)
         self._reaped: "OrderedDict[str, str]" = OrderedDict()
@@ -200,13 +208,16 @@ class BacktestingService:
                 config_data=config["config"],
                 controllers_module=settings.app.controllers_module
             )
-        backtesting_results = await self._engine.run_backtesting(
-            controller_config=controller_config,
-            trade_cost=config.get("trade_cost", 0.0006),
-            start=int(config["start_time"]),
-            end=int(config["end_time"]),
-            backtesting_resolution=config.get("backtesting_resolution", "1m"),
-        )
+        # The config instances above come from stateless classmethods; only the run itself
+        # needs the engine to be exclusively ours.
+        async with self._engine_lock:
+            backtesting_results = await self._engine.run_backtesting(
+                controller_config=controller_config,
+                trade_cost=config.get("trade_cost", 0.0006),
+                start=int(config["start_time"]),
+                end=int(config["end_time"]),
+                backtesting_resolution=config.get("backtesting_resolution", "1m"),
+            )
         processed_data = backtesting_results["processed_data"]["features"].fillna(0)
         executors_info = [e.to_dict() for e in backtesting_results["executors"]]
         results = backtesting_results["results"]
