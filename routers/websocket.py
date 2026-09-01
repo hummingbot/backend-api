@@ -7,8 +7,10 @@ import logging
 import secrets
 import time
 import uuid
+from typing import Optional, Tuple
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from starlette.websockets import WebSocketState
 
 from config import settings
 from services.websocket_manager import WebSocketManager
@@ -19,42 +21,106 @@ router = APIRouter(tags=["WebSocket"])
 
 HEARTBEAT_INTERVAL = 30  # seconds
 
+# Subprotocol a browser client offers to carry its credentials, since the JS WebSocket API
+# cannot set an Authorization header: new WebSocket(url, ["hummingbot-auth", b64url(user:pass)])
+AUTH_SUBPROTOCOL = "hummingbot-auth"
 
-def _authenticate_websocket(websocket: WebSocket) -> bool:
-    """
-    Authenticate a WebSocket connection using Basic Auth from headers or query params.
 
-    Returns True if authenticated, False otherwise.
+def _decode_basic_credentials(encoded: str) -> Optional[Tuple[str, str]]:
     """
-    # Try Authorization header first
+    Decode a ``base64(username:password)`` blob into its two halves.
+
+    Accepts base64url as well as standard base64, with or without padding: base64url is the
+    only variant whose alphabet is a valid ``Sec-WebSocket-Protocol`` token, so browser
+    clients have to use it, while ``Authorization: Basic`` uses the standard alphabet.
+
+    Returns None if the blob is not decodable or carries no ``:`` separator.
+    """
+    padded = encoded + "=" * (-len(encoded) % 4)
+    try:
+        decoded = base64.b64decode(padded.replace("-", "+").replace("_", "/")).decode("utf-8")
+    except Exception:
+        return None
+    if ":" not in decoded:
+        return None
+    username, password = decoded.split(":", 1)
+    return username, password
+
+
+def _authenticate_websocket(websocket: WebSocket) -> Tuple[bool, Optional[str]]:
+    """
+    Authenticate a WebSocket handshake from its headers, before it is accepted.
+
+    Credentials are never read from the query string: uvicorn logs the full path *with* its
+    query string for every handshake, so a ``?username=``/``?password=``/``?token=`` channel
+    would write the global admin credentials into access logs, traces and browser history.
+
+    Two credential channels are supported, both header-based:
+      - ``Authorization: Basic base64(username:password)`` — same channel as the HTTP routes,
+        for any client that can set request headers.
+      - ``Sec-WebSocket-Protocol: hummingbot-auth, base64url(username:password)`` — for
+        browsers, whose ``new WebSocket(url, protocols)`` API cannot set headers but can
+        offer subprotocols.
+
+    Returns ``(authenticated, subprotocol)``. When credentials arrived over the subprotocol
+    channel the selected subprotocol must be echoed back in ``websocket.accept()``, otherwise
+    the browser fails the connection itself.
+    """
+    credentials: Optional[Tuple[str, str]] = None
+    subprotocol: Optional[str] = None
+
     auth_header = websocket.headers.get("authorization", "")
     if auth_header.startswith("Basic "):
-        try:
-            decoded = base64.b64decode(auth_header[6:]).decode("utf-8")
-            ws_user, ws_pass = decoded.split(":", 1)
-        except Exception:
-            return False
+        credentials = _decode_basic_credentials(auth_header[6:])
     else:
-        # Fallback: ?token=base64(user:pass) query param
-        token = websocket.query_params.get("token")
-        if token:
-            try:
-                decoded = base64.b64decode(token).decode("utf-8")
-                ws_user, ws_pass = decoded.split(":", 1)
-            except Exception:
-                return False
-        else:
-            # Fallback to query parameters
-            ws_user = websocket.query_params.get("username", "")
-            ws_pass = websocket.query_params.get("password", "")
+        offered = [
+            protocol.strip()
+            for protocol in websocket.headers.get("sec-websocket-protocol", "").split(",")
+            if protocol.strip()
+        ]
+        if len(offered) >= 2 and offered[0] == AUTH_SUBPROTOCOL:
+            credentials = _decode_basic_credentials(offered[1])
+            subprotocol = AUTH_SUBPROTOCOL
 
+    if credentials is None:
+        return False, None
+
+    ws_user, ws_pass = credentials
     correct_user = secrets.compare_digest(
         ws_user.encode(), settings.security.username.encode()
     )
     correct_pass = secrets.compare_digest(
         ws_pass.encode(), settings.security.password.encode()
     )
-    return correct_user and correct_pass
+    return bool(correct_user and correct_pass), subprotocol
+
+
+async def _reject_unauthenticated(websocket: WebSocket) -> None:
+    """
+    Refuse the handshake itself instead of accepting it and closing with 4001.
+
+    An unauthenticated peer never reaches an open WebSocket: it gets an HTTP 401 handshake
+    response where the server supports the ASGI websocket denial-response extension, and a
+    1008 policy-violation close (which the server turns into an HTTP 403) where it does not.
+    """
+    if websocket.client_state == WebSocketState.CONNECTING:
+        await websocket.receive()
+
+    if "websocket.http.response" in (websocket.scope.get("extensions") or {}):
+        await websocket.send({
+            "type": "websocket.http.response.start",
+            "status": 401,
+            "headers": [
+                (b"www-authenticate", b'Basic realm="hummingbot-api"'),
+                (b"content-type", b"text/plain; charset=utf-8"),
+            ],
+        })
+        await websocket.send({
+            "type": "websocket.http.response.body",
+            "body": b"Authentication failed",
+        })
+    else:
+        await websocket.close(code=1008, reason="Authentication failed")
 
 
 async def _heartbeat_loop(websocket: WebSocket) -> None:
@@ -77,8 +143,11 @@ async def market_data_websocket(websocket: WebSocket) -> None:
     """
     WebSocket endpoint for streaming market data.
 
-    Authentication: Basic Auth via Authorization header, ?token=base64(user:pass),
-    or query params (?username=...&password=...).
+    Authentication (headers only, never the query string):
+        - Authorization: Basic base64(username:password)
+        - Sec-WebSocket-Protocol: hummingbot-auth, base64url(username:password)
+          for browsers; the server echoes back the "hummingbot-auth" subprotocol.
+    Unauthenticated handshakes are refused with HTTP 401, not accepted.
 
     Subscribe/unsubscribe protocol:
         -> {"action": "subscribe", "type": "candles", "connector": "binance",
@@ -93,15 +162,12 @@ async def market_data_websocket(websocket: WebSocket) -> None:
         - order_book: order book snapshots with configurable depth
         - trades: real-time trade events
     """
-    await websocket.accept()
-
-    if not _authenticate_websocket(websocket):
-        await websocket.send_json({
-            "type": "error",
-            "message": "Authentication failed",
-        })
-        await websocket.close(code=4001, reason="Authentication failed")
+    authenticated, subprotocol = _authenticate_websocket(websocket)
+    if not authenticated:
+        await _reject_unauthenticated(websocket)
         return
+
+    await websocket.accept(subprotocol=subprotocol)
 
     manager: WebSocketManager = websocket.app.state.websocket_manager
     conn_id = manager.generate_connection_id()
@@ -158,8 +224,11 @@ async def executors_websocket(websocket: WebSocket) -> None:
     """
     WebSocket endpoint for streaming executor data.
 
-    Authentication: Basic Auth via Authorization header, ?token=base64(user:pass),
-    or query params (?username=...&password=...).
+    Authentication (headers only, never the query string):
+        - Authorization: Basic base64(username:password)
+        - Sec-WebSocket-Protocol: hummingbot-auth, base64url(username:password)
+          for browsers; the server echoes back the "hummingbot-auth" subprotocol.
+    Unauthenticated handshakes are refused with HTTP 401, not accepted.
 
     Subscribe/unsubscribe protocol:
         -> {"action": "subscribe", "type": "executor_summary", "update_interval": 2.0}
@@ -178,16 +247,12 @@ async def executors_websocket(websocket: WebSocket) -> None:
         - bot_status: single bot status with performance & custom_info (requires bot_name)
         - all_bots_status: all active bots status with performance & custom_info
     """
-    await websocket.accept()
-
-    # Authenticate
-    if not _authenticate_websocket(websocket):
-        await websocket.send_json({
-            "type": "error",
-            "message": "Authentication failed",
-        })
-        await websocket.close(code=4001, reason="Authentication failed")
+    authenticated, subprotocol = _authenticate_websocket(websocket)
+    if not authenticated:
+        await _reject_unauthenticated(websocket)
         return
+
+    await websocket.accept(subprotocol=subprotocol)
 
     # Get manager from app state
     manager = websocket.app.state.executor_ws_manager
