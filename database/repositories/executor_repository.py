@@ -396,58 +396,50 @@ class ExecutorRepository:
         return result.rowcount > 0
 
     async def get_executor_stats(self) -> Dict[str, Any]:
-        """Get statistics about executors."""
-        # Total executors
-        total_stmt = select(func.count(ExecutorRecord.id))
-        total_result = await self.session.execute(total_stmt)
-        total_executors = total_result.scalar() or 0
+        """Get statistics about executors.
 
-        # Active executors
-        active_stmt = select(func.count(ExecutorRecord.id)).where(
-            ExecutorRecord.status == "RUNNING"
+        Two round-trips, not seven: one row of scalar aggregates, and one grouped
+        statement the three per-column breakdowns are pivoted out of in Python. The
+        aggregate shape is the same one `get_performance_report` uses next door.
+        """
+        agg_stmt = select(
+            func.count(ExecutorRecord.id).label("total"),
+            func.coalesce(func.sum(case(
+                (ExecutorRecord.status == "RUNNING", 1),
+                else_=0,
+            )), 0).label("active"),
+            func.coalesce(func.sum(ExecutorRecord.net_pnl_quote), Decimal(0)).label("pnl"),
+            # The volume generated, not the capital deployed.
+            func.coalesce(func.sum(ExecutorRecord.filled_amount_quote), Decimal(0)).label("vol"),
         )
-        active_result = await self.session.execute(active_stmt)
-        active_executors = active_result.scalar() or 0
+        agg_row = (await self.session.execute(agg_stmt)).one()
 
-        # Total PnL
-        pnl_stmt = select(func.sum(ExecutorRecord.net_pnl_quote))
-        pnl_result = await self.session.execute(pnl_stmt)
-        total_pnl = pnl_result.scalar() or Decimal("0")
-
-        # Total volume — the volume generated, not the capital deployed.
-        volume_stmt = select(func.sum(ExecutorRecord.filled_amount_quote))
-        volume_result = await self.session.execute(volume_stmt)
-        total_volume = volume_result.scalar() or Decimal("0")
-
-        # Executors by type
-        type_stmt = select(
+        # One grouped statement carries all three breakdowns. The number of rows it
+        # returns is bounded by the distinct (type, status, connector) combinations --
+        # a handful in practice -- and each breakdown is summed back out of them below.
+        group_stmt = select(
             ExecutorRecord.executor_type,
-            func.count(ExecutorRecord.id).label('count')
-        ).group_by(ExecutorRecord.executor_type)
-        type_result = await self.session.execute(type_stmt)
-        type_counts = {row.executor_type: row.count for row in type_result}
-
-        # Executors by status
-        status_stmt = select(
             ExecutorRecord.status,
-            func.count(ExecutorRecord.id).label('count')
-        ).group_by(ExecutorRecord.status)
-        status_result = await self.session.execute(status_stmt)
-        status_counts = {row.status: row.count for row in status_result}
-
-        # Executors by connector
-        connector_stmt = select(
             ExecutorRecord.connector_name,
-            func.count(ExecutorRecord.id).label('count')
-        ).group_by(ExecutorRecord.connector_name)
-        connector_result = await self.session.execute(connector_stmt)
-        connector_counts = {row.connector_name: row.count for row in connector_result}
+            func.count(ExecutorRecord.id).label("count"),
+        ).group_by(
+            ExecutorRecord.executor_type,
+            ExecutorRecord.status,
+            ExecutorRecord.connector_name,
+        )
+        type_counts: Dict[str, int] = {}
+        status_counts: Dict[str, int] = {}
+        connector_counts: Dict[str, int] = {}
+        for row in await self.session.execute(group_stmt):
+            type_counts[row.executor_type] = type_counts.get(row.executor_type, 0) + row.count
+            status_counts[row.status] = status_counts.get(row.status, 0) + row.count
+            connector_counts[row.connector_name] = connector_counts.get(row.connector_name, 0) + row.count
 
         return {
-            "total_executors": total_executors,
-            "active_executors": active_executors,
-            "total_pnl_quote": float(total_pnl),
-            "total_volume_quote": float(total_volume),
+            "total_executors": agg_row.total or 0,
+            "active_executors": agg_row.active or 0,
+            "total_pnl_quote": float(agg_row.pnl),
+            "total_volume_quote": float(agg_row.vol),
             "type_counts": type_counts,
             "status_counts": status_counts,
             "connector_counts": connector_counts
