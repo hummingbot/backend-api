@@ -6,7 +6,7 @@ the handlers, which only decide what to answer the caller.
 """
 import logging
 from decimal import Decimal
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from database.repositories import GatewaySwapRepository
 from services.repository_service import RepositoryService
@@ -69,6 +69,52 @@ class GatewaySwapService(RepositoryService):
 
         await self._in_repo_best_effort(
             _fn, error_message="Error recording swap in database")
+
+    async def get_pending_swaps(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Swaps still awaiting confirmation, as plain dicts.
+
+        The poller does Gateway I/O between reading these and writing the result, so
+        the session is closed before it starts and ORM instances must not outlive it.
+        """
+        async def _fn(swap_repo):
+            swaps = await swap_repo.get_pending_swaps(limit=limit)
+            return [
+                {
+                    "transaction_hash": swap.transaction_hash,
+                    "network": swap.network,
+                    "timestamp": swap.timestamp,
+                }
+                for swap in swaps
+            ]
+
+        return await self._in_repo(_fn)
+
+    async def update_swap_status(
+        self,
+        *,
+        transaction_hash: str,
+        status: str,
+        error_message: Optional[str] = None,
+        gas_fee: Optional[Decimal] = None,
+        gas_token: Optional[str] = None,
+    ) -> None:
+        """Record what polling the chain found for a submitted swap.
+
+        Best-effort like every other write here: the swap settled (or did not) on-chain
+        regardless, and a database problem must not stop the poll cycle reaching the
+        rest of the pending book.
+        """
+        async def _fn(swap_repo):
+            await swap_repo.update_swap_status(
+                transaction_hash=transaction_hash,
+                status=status,
+                error_message=error_message,
+                gas_fee=gas_fee,
+                gas_token=gas_token,
+            )
+
+        await self._in_repo_best_effort(
+            _fn, error_message=f"Error recording {status} status for swap {transaction_hash}")
 
     async def get_swap(self, transaction_hash: str) -> Optional[Dict[str, Any]]:
         """One swap by transaction hash, or None when there is no such row.

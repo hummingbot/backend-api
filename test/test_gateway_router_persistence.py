@@ -211,6 +211,16 @@ def test_open_writes_the_same_position_row():
         "base_token_amount": 0.0099,
         "quote_token_amount": 1.98,
         "in_range": "UNKNOWN",
+        # The columns this route did not use to write at all. It shares one row
+        # builder with the poller's discovery sweep (ARCH-103), so the key set no
+        # longer depends on which path recorded the position — what the open route
+        # cannot know is NULL, and what is genuinely zero at open time is zero.
+        "lower_bin_id": None,
+        "upper_bin_id": None,
+        "base_fee_pending": 0.0,
+        "quote_fee_pending": 0.0,
+        "base_fee_collected": 0.0,
+        "quote_fee_collected": 0.0,
     }
 
 

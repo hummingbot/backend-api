@@ -1,11 +1,11 @@
 """Persistence for CLMM positions and their lifecycle events.
 
-Everything the ``/gateway/clmm/*`` routes know about the database lives here: the
-shape of a position row, the shape of each event row (OPEN, ADD_LIQUIDITY,
-REMOVE_LIQUIDITY, CLOSE, COLLECT_FEES), and the bookkeeping each one applies to the
-position it belongs to. The handlers used to carry a copy of all three per endpoint,
-which is how the poller's auto-discovery path ended up deriving a different key set
-for the same table.
+Everything the ``/gateway/clmm/*`` routes and the transaction poller know about the
+database lives here: the shape of a position row, the shape of each event row (OPEN,
+ADD_LIQUIDITY, REMOVE_LIQUIDITY, CLOSE, COLLECT_FEES), and the bookkeeping each one
+applies to the position it belongs to. The handlers used to carry a copy of all three
+per endpoint, which is how the poller's auto-discovery path ended up deriving a
+different key set for the same table — see :func:`build_position_row`.
 
 Reads propagate their errors; the after-the-fact recording of an operation that is
 already on-chain is best-effort, per ``RepositoryService``.
@@ -13,13 +13,104 @@ already on-chain is best-effort, per ``RepositoryService``.
 import asyncio
 import logging
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from database.repositories import GatewayCLMMRepository
 from services.gateway_client import check_gateway_error
 from services.repository_service import RepositoryService
 
 logger = logging.getLogger(__name__)
+
+
+def build_position_row(
+    *,
+    position_address: str,
+    pool_address: str,
+    network: str,
+    connector: str,
+    wallet_address: str,
+    trading_pair: str,
+    base_token: str,
+    quote_token: str,
+    lower_price: Any,
+    upper_price: Any,
+    entry_price: Optional[Any],
+    current_price: Optional[Any],
+    initial_base_token_amount: Any,
+    initial_quote_token_amount: Any,
+    base_token_amount: Any,
+    quote_token_amount: Any,
+    lower_bin_id: Optional[int] = None,
+    upper_bin_id: Optional[int] = None,
+    position_rent: Optional[Any] = None,
+    in_range: str = "UNKNOWN",
+    base_fee_pending: Any = 0,
+    quote_fee_pending: Any = 0,
+) -> Dict[str, Any]:
+    """The one description of what a new ``gateway_clmm_positions`` row contains.
+
+    A position reaches the table by two routes — ``/gateway/clmm/open`` opens one, and
+    the poller's discovery sweep finds one that was opened elsewhere — and each used to
+    assemble the row itself. The key sets drifted apart: discovery wrote ``lower_bin_id``,
+    ``upper_bin_id``, ``base_fee_pending`` and ``quote_fee_pending``, the route wrote
+    ``position_rent``, and neither wrote the other's columns. The same logical position
+    therefore had two different row shapes depending on which path recorded it, and
+    anything reading the table back had to know which one to expect.
+
+    So the key set is fixed here, and it is the union: every caller yields the same
+    columns, and a caller that cannot know a value passes nothing rather than omitting
+    the column. Absent is expressed as NULL (bin ids the route never learns, rent no
+    discovered position ever locked through us) and zero only where zero is the fact —
+    a position that has just come into the table has collected no fees.
+
+    ``lower_price``/``upper_price``/the amounts accept anything ``float()`` takes, so
+    both a route's ``Decimal`` and Gateway's parsed JSON floats arrive the same way.
+    """
+    # (upper - lower) / lower, computed on Decimals so a route's exact request values
+    # and the poller's floats round identically.
+    percentage = None
+    if lower_price and upper_price and Decimal(str(lower_price)) > 0:
+        percentage = float(
+            (Decimal(str(upper_price)) - Decimal(str(lower_price))) / Decimal(str(lower_price))
+        )
+        logger.info(f"Position price range percentage: {percentage:.4f} ({percentage * 100:.2f}%)")
+
+    return {
+        "position_address": position_address,
+        "pool_address": pool_address,
+        "network": network,
+        "connector": connector,
+        "wallet_address": wallet_address,
+        "trading_pair": trading_pair,
+        "base_token": base_token,
+        "quote_token": quote_token,
+        "status": "OPEN",
+        "lower_price": float(lower_price),
+        "upper_price": float(upper_price),
+        # Bin-based CLMMs (Meteora) identify a range by bin; Gateway reports them on a
+        # position it lists, not on the response to opening one.
+        "lower_bin_id": lower_bin_id,
+        "upper_bin_id": upper_bin_id,
+        "entry_price": float(entry_price) if entry_price is not None else None,
+        "current_price": float(current_price) if current_price is not None else None,
+        "percentage": percentage,
+        "initial_base_token_amount": float(initial_base_token_amount),
+        "initial_quote_token_amount": float(initial_quote_token_amount),
+        # Rent is locked, not spent, and only the open route observes the figure. NULL
+        # rather than 0: a stored 0.0 claims a measurement that came back empty, which
+        # nothing downstream can tell from rent that was never read.
+        "position_rent": float(position_rent) if position_rent else None,
+        "base_token_amount": float(base_token_amount),
+        "quote_token_amount": float(quote_token_amount),
+        "in_range": in_range,
+        # Fees already accrued on-chain but not yet collected. Zero on a fresh open;
+        # a discovered position may have been earning for days before we saw it.
+        "base_fee_pending": float(base_fee_pending),
+        "quote_fee_pending": float(quote_fee_pending),
+        # Nothing has been collected through us yet on either path, by definition.
+        "base_fee_collected": 0.0,
+        "quote_fee_collected": 0.0,
+    }
 
 
 async def refresh_position_data(position, gateway_client, clmm_repo: GatewayCLMMRepository):
@@ -289,37 +380,30 @@ class GatewayCLMMService(RepositoryService):
         tx_status: str,
     ) -> None:
         """Record a newly opened position and its OPEN event."""
-        # Calculate percentage: (upper_price - lower_price) / lower_price
-        percentage = None
-        if lower_price and upper_price and lower_price > 0:
-            percentage = float((upper_price - lower_price) / lower_price)
-            logger.info(f"Position price range percentage: {percentage:.4f} ({percentage*100:.2f}%)")
+        position_data = build_position_row(
+            position_address=position_address,
+            pool_address=pool_address,
+            network=network,
+            connector=connector,
+            wallet_address=wallet_address,
+            trading_pair=trading_pair,
+            base_token=base_token,
+            quote_token=quote_token,
+            lower_price=lower_price,
+            upper_price=upper_price,
+            entry_price=entry_price,  # Pool price when position opened
+            current_price=entry_price,  # Same as entry at open time, updated by poller
+            initial_base_token_amount=base_amount_added,
+            initial_quote_token_amount=quote_amount_added,
+            base_token_amount=base_amount_added,
+            quote_token_amount=quote_amount_added,
+            position_rent=position_rent,
+            # in_range is left UNKNOWN rather than derived from the entry price: the
+            # poller re-reads the position from the chain within the minute and is the
+            # only thing that has ever set this column from an observation.
+        )
 
         async def _fn(clmm_repo):
-            # Create position record
-            position_data = {
-                "position_address": position_address,
-                "pool_address": pool_address,
-                "network": network,
-                "connector": connector,
-                "wallet_address": wallet_address,
-                "trading_pair": trading_pair,
-                "base_token": base_token,
-                "quote_token": quote_token,
-                "status": "OPEN",
-                "lower_price": float(lower_price),
-                "upper_price": float(upper_price),
-                "percentage": percentage,
-                "entry_price": entry_price,  # Pool price when position opened
-                "current_price": entry_price,  # Same as entry at open time, updated by poller
-                "initial_base_token_amount": float(base_amount_added),
-                "initial_quote_token_amount": float(quote_amount_added),
-                "position_rent": float(position_rent) if position_rent else None,
-                "base_token_amount": float(base_amount_added),
-                "quote_token_amount": float(quote_amount_added),
-                "in_range": "UNKNOWN"  # Will be updated by poller
-            }
-
             position = await clmm_repo.create_position(position_data)
             logger.info(f"Recorded CLMM position in database: {position_address}")
 
@@ -692,3 +776,317 @@ class GatewayCLMMService(RepositoryService):
                 f"CLMM {event_type} {transaction_hash} landed on-chain and FAILED for position "
                 f"{position_address}; recorded. {error}"
             )
+
+    # ------------------------------------------------------------------
+    # Transaction poller
+    #
+    # The poller used to construct GatewayCLMMRepository itself in five places and
+    # hold one session open across a whole poll cycle's worth of Gateway calls. It
+    # now decides *what the chain says* — status classification, the dropped grace
+    # window, the consecutive-miss gate — and everything about *what gets written*
+    # lives here with the routes' writes. Each operation takes its own short session,
+    # so a failure part-way through a cycle no longer discards the statuses already
+    # confirmed in it.
+    # ------------------------------------------------------------------
+
+    async def get_pending_events(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Events still awaiting confirmation, with the network their position sits on.
+
+        Returned as plain dicts: the poller does Gateway I/O between reading these and
+        writing the result, and ORM instances must not outlive their session.
+        ``network`` is None when the event's position row is missing, which the caller
+        reports rather than guessing a chain from.
+        """
+        async def _fn(clmm_repo):
+            events = await clmm_repo.get_pending_events(limit=limit)
+            pending = []
+            for event in events:
+                position = await clmm_repo.get_position_by_id(event.position_id)
+                pending.append({
+                    "transaction_hash": event.transaction_hash,
+                    "timestamp": event.timestamp,
+                    "network": position.network if position else None,
+                    "position_address": position.position_address if position else None,
+                })
+            return pending
+
+        return await self._in_repo(_fn)
+
+    async def update_event_status(
+        self,
+        *,
+        transaction_hash: str,
+        status: str,
+        error_message: Optional[str] = None,
+        gas_fee: Optional[Decimal] = None,
+        gas_token: Optional[str] = None,
+    ) -> None:
+        """Record what a poll found for an event that did not confirm."""
+        async def _fn(clmm_repo):
+            await clmm_repo.update_event_status(
+                transaction_hash=transaction_hash,
+                status=status,
+                error_message=error_message,
+                gas_fee=gas_fee,
+                gas_token=gas_token,
+            )
+
+        await self._in_repo_best_effort(
+            _fn, error_message=f"Error recording {status} status for CLMM event {transaction_hash}")
+
+    async def record_event_confirmed(
+        self,
+        *,
+        transaction_hash: str,
+        gas_fee: Optional[Decimal] = None,
+        gas_token: Optional[str] = None,
+    ) -> None:
+        """Mark an event CONFIRMED and apply the bookkeeping it owes its position.
+
+        Both halves share one session, as they always have. The bookkeeping is guarded
+        separately: a position that cannot be booked must not roll back the confirmed
+        status, or the next cycle would poll the same transaction and book it twice.
+        """
+        async def _fn(clmm_repo):
+            event = await clmm_repo.update_event_status(
+                transaction_hash=transaction_hash,
+                status="CONFIRMED",
+                gas_fee=gas_fee,
+                gas_token=gas_token,
+            )
+            if event is None:
+                logger.warning(f"CLMM event {transaction_hash} confirmed on-chain but has no row to update")
+                return
+
+            try:
+                await self._book_confirmed_event(clmm_repo, event)
+            except Exception as e:
+                logger.error(f"Error updating position from event {event.id}: {e}", exc_info=True)
+
+        await self._in_repo_best_effort(
+            _fn, error_message=f"Error confirming CLMM event {transaction_hash}")
+
+    @staticmethod
+    async def _book_confirmed_event(clmm_repo, event) -> None:
+        """Apply a newly confirmed event's effect to its position.
+
+        Fee and capital booking happens exactly once, here: the routes only mutate the
+        position when Gateway confirmed the transaction inline (those events are created
+        CONFIRMED and never reach this path), and leave submitted-not-confirmed booking
+        to the poller.
+        """
+        position = await clmm_repo.get_position_by_id(event.position_id)
+        if not position:
+            logger.error(f"Position not found for event {event.id}")
+            return
+
+        if event.event_type == "CLOSE":
+            if event.base_fee_collected is not None or event.quote_fee_collected is not None:
+                new_base = float(position.base_fee_collected or 0) + float(event.base_fee_collected or 0)
+                new_quote = float(position.quote_fee_collected or 0) + float(event.quote_fee_collected or 0)
+                await clmm_repo.update_position_fees(
+                    position_address=position.position_address,
+                    base_fee_collected=Decimal(str(new_base)),
+                    quote_fee_collected=Decimal(str(new_quote)),
+                    base_fee_pending=Decimal("0"),
+                    quote_fee_pending=Decimal("0")
+                )
+            await clmm_repo.close_position(position.position_address)
+
+        elif event.event_type == "ADD_LIQUIDITY":
+            # Added capital raises both the PnL baseline and the held amounts. Event
+            # amounts may be the requested figures (recorded at submit time) rather
+            # than on-chain actuals — the accepted residual is that pending-tx amounts
+            # are not backfilled from txData; requested amounts are the best available.
+            if event.base_token_amount or event.quote_token_amount:
+                await clmm_repo.add_to_position_amounts(
+                    position_address=position.position_address,
+                    base_delta=Decimal(str(event.base_token_amount or 0)),
+                    quote_delta=Decimal(str(event.quote_token_amount or 0)),
+                )
+
+        elif event.event_type == "REMOVE_LIQUIDITY":
+            # The mirror of ADD_LIQUIDITY: withdrawn capital lowers both the held
+            # amounts and the PnL baseline.
+            if event.base_token_amount or event.quote_token_amount:
+                await clmm_repo.subtract_from_position_amounts(
+                    position_address=position.position_address,
+                    base_delta=Decimal(str(event.base_token_amount or 0)),
+                    quote_delta=Decimal(str(event.quote_token_amount or 0)),
+                )
+
+        elif event.event_type == "COLLECT_FEES":
+            if event.base_fee_collected or event.quote_fee_collected:
+                new_base_collected = float(position.base_fee_collected or 0) + float(event.base_fee_collected or 0)
+                new_quote_collected = float(position.quote_fee_collected or 0) + float(event.quote_fee_collected or 0)
+                await clmm_repo.update_position_fees(
+                    position_address=position.position_address,
+                    base_fee_collected=Decimal(str(new_base_collected)),
+                    quote_fee_collected=Decimal(str(new_quote_collected)),
+                    base_fee_pending=Decimal("0"),
+                    quote_fee_pending=Decimal("0")
+                )
+
+    async def get_tracked_position_addresses(self, recently_closed_seconds: int) -> Dict[str, Set[str]]:
+        """The three address sets the discovery sweep compares Gateway's listing against.
+
+        One session for all three: they are read together and used together, and a
+        position that changed status between them would make the sweep contradict itself.
+        """
+        async def _fn(clmm_repo):
+            return {
+                "open": await clmm_repo.get_position_addresses_set(status="OPEN"),
+                "closed": await clmm_repo.get_position_addresses_set(status="CLOSED"),
+                "recently_closed": await clmm_repo.get_recently_closed_addresses(recently_closed_seconds),
+            }
+
+        return await self._in_repo(_fn)
+
+    async def reopen_position(self, position_address: str) -> bool:
+        """Undo a close for a position the chain still reports as live. True if reopened."""
+        async def _fn(clmm_repo):
+            return await clmm_repo.reopen_position(position_address) is not None
+
+        return await self._in_repo_best_effort(
+            _fn, error_message=f"Error reopening position {position_address}", default=False)
+
+    async def record_discovered_position(
+        self,
+        *,
+        pos_data: Dict[str, Any],
+        connector: str,
+        network: str,
+        wallet_address: str,
+    ) -> bool:
+        """Record a position the poller found on-chain that hapi has no row for.
+
+        These were opened elsewhere (the UI, an executor talking to Gateway directly),
+        so the entry price and the initial deposit are unknowable: what the chain holds
+        right now is the best available estimate for both, and is recorded as such.
+
+        The row itself is :func:`build_position_row`'s — the same columns the open route
+        writes — and it is paired with a synthetic DISCOVERED event so the history says
+        where the row came from.
+        """
+        position_address = pos_data.get("address")
+        if not position_address:
+            return False
+
+        # Full token addresses are used as the token identity here, as the open route does.
+        base_token = pos_data.get("baseTokenAddress") or "UNKNOWN"
+        quote_token = pos_data.get("quoteTokenAddress") or "UNKNOWN"
+
+        current_price = float(pos_data.get("price", 0))
+        lower_price = float(pos_data.get("lowerPrice", 0))
+        upper_price = float(pos_data.get("upperPrice", 0))
+
+        base_token_amount = float(pos_data.get("baseTokenAmount", 0))
+        quote_token_amount = float(pos_data.get("quoteTokenAmount", 0))
+
+        in_range = "UNKNOWN"
+        if current_price > 0 and lower_price > 0 and upper_price > 0:
+            in_range = "IN_RANGE" if lower_price <= current_price <= upper_price else "OUT_OF_RANGE"
+
+        position_data = build_position_row(
+            position_address=position_address,
+            pool_address=pos_data.get("poolAddress", ""),
+            network=network,
+            connector=connector,
+            wallet_address=wallet_address,
+            trading_pair=f"{base_token}-{quote_token}",
+            base_token=base_token,
+            quote_token=quote_token,
+            lower_price=lower_price,
+            upper_price=upper_price,
+            lower_bin_id=pos_data.get("lowerBinId"),
+            upper_bin_id=pos_data.get("upperBinId"),
+            entry_price=current_price,  # Best available estimate
+            current_price=current_price,
+            # Nothing records what was originally deposited, so what is held now stands
+            # in for it — the PnL baseline starts at the moment of discovery.
+            initial_base_token_amount=base_token_amount,
+            initial_quote_token_amount=quote_token_amount,
+            base_token_amount=base_token_amount,
+            quote_token_amount=quote_token_amount,
+            in_range=in_range,
+            base_fee_pending=float(pos_data.get("baseFeeAmount", 0)),
+            quote_fee_pending=float(pos_data.get("quoteFeeAmount", 0)),
+        )
+
+        async def _fn(clmm_repo):
+            position = await clmm_repo.create_position(position_data)
+            await clmm_repo.create_event({
+                "position_id": position.id,
+                # Synthetic: there is no transaction of ours to confirm.
+                "transaction_hash": f"discovered_{position_address[:16]}",
+                "event_type": "DISCOVERED",
+                "base_token_amount": base_token_amount,
+                "quote_token_amount": quote_token_amount,
+                "status": "CONFIRMED",
+            })
+            return True
+
+        return await self._in_repo_best_effort(
+            _fn, error_message=f"Error creating discovered position {position_address}", default=False)
+
+    async def get_open_positions(self) -> List[Dict[str, Any]]:
+        """The open positions the poller refreshes, as plain dicts.
+
+        Only the fields needed to re-read a position from Gateway: the refresh does
+        network I/O per position and must not hold a session while it does.
+        """
+        async def _fn(clmm_repo):
+            positions = await clmm_repo.get_open_positions()
+            return [
+                {
+                    "id": position.id,
+                    "position_address": position.position_address,
+                    "wallet_address": position.wallet_address,
+                    "connector": position.connector,
+                    "network": position.network,
+                }
+                for position in positions
+            ]
+
+        return await self._in_repo(_fn)
+
+    async def mark_position_closed(self, position_address: str) -> None:
+        """Close a position the chain no longer reports. Never fails the poll cycle."""
+        async def _fn(clmm_repo):
+            await clmm_repo.close_position(position_address)
+
+        await self._in_repo_best_effort(
+            _fn, error_message=f"Error closing position {position_address}")
+
+    async def record_position_state(
+        self,
+        *,
+        position_address: str,
+        base_token_amount: Decimal,
+        quote_token_amount: Decimal,
+        in_range: str,
+        current_price: Decimal,
+        base_fee_pending: Decimal,
+        quote_fee_pending: Decimal,
+    ) -> None:
+        """Write back everything one on-chain read of a position says, in one session.
+
+        Pending fees are always written: 0 is a real value right after an external
+        collect, and a non-zero guard would leave the old figure standing forever.
+        """
+        async def _fn(clmm_repo):
+            await clmm_repo.update_position_liquidity(
+                position_address=position_address,
+                base_token_amount=base_token_amount,
+                quote_token_amount=quote_token_amount,
+                in_range=in_range,
+                current_price=current_price,
+            )
+            await clmm_repo.update_position_fees(
+                position_address=position_address,
+                base_fee_pending=base_fee_pending,
+                quote_fee_pending=quote_fee_pending,
+            )
+
+        await self._in_repo_best_effort(
+            _fn, error_message=f"Error updating state for position {position_address}")
