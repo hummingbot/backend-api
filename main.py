@@ -54,6 +54,7 @@ from routers import (  # noqa: E402
     gateway_clmm,
     gateway_swap,
     market_data,
+    performance,
     portfolio,
     scripts,
     storage,
@@ -472,6 +473,7 @@ app.include_router(bot_orchestration.router, dependencies=[Depends(auth_user)])
 app.include_router(controllers.router, dependencies=[Depends(auth_user)])
 app.include_router(scripts.router, dependencies=[Depends(auth_user)])
 app.include_router(market_data.router, dependencies=[Depends(auth_user)])
+app.include_router(performance.router, dependencies=[Depends(auth_user)])
 app.include_router(backtesting.router, dependencies=[Depends(auth_user)])
 app.include_router(archived_bots.router, dependencies=[Depends(auth_user)])
 app.include_router(storage.router, dependencies=[Depends(auth_user)])

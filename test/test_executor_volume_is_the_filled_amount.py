@@ -39,6 +39,24 @@ def test_the_performance_snapshot_has_no_separate_volume_column():
     )
 
 
+def test_the_normalized_performance_row_reads_the_filled_amount_as_volume():
+    """The unified /performance/history route maps volume_quote from the one field.
+
+    A row that read a second column here would put the LP deposit back into volume by the
+    back door, on the newest reader rather than the oldest.
+    """
+    from models.performance import executor_row_to_performance_row
+
+    row = executor_row_to_performance_row({
+        "timestamp": "2026-09-01T12:00:00+00:00",
+        "executor_id": "e-1",
+        "status": "RUNNING",
+        "filled_amount_quote": 2500.0,
+    })
+
+    assert row.volume_quote == 2500.0
+
+
 def test_every_aggregate_sums_the_filled_amount():
     """Three aggregates summed the old column; a fourth added later would too."""
     source = inspect.getsource(ExecutorRepository.get_performance_report)

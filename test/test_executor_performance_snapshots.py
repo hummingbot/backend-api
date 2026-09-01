@@ -15,7 +15,8 @@ followed:
 What is pinned here: the periodic snapshot, the terminal row that ends a closed
 executor's series inside the snapshot table (no join to `executors`, and no exposure to
 the two paths that leave that row at zero), the reap adopting the last snapshot, the
-grain-parameterized sampler and retention.
+grain-parameterized sampler, retention, and the normalized row shape both subjects map
+into.
 """
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -28,6 +29,7 @@ pytest.importorskip("hummingbot")
 
 from database.models import ControllerPerformanceSnapshot, ExecutorPerformanceSnapshot  # noqa: E402
 from database.repositories.executor_performance_repository import ExecutorPerformanceRepository  # noqa: E402
+from models.performance import controller_row_to_performance_row, executor_row_to_performance_row  # noqa: E402
 from services.executor_service import ExecutorService  # noqa: E402
 
 NOW = datetime(2026, 9, 1, 12, 0, tzinfo=timezone.utc)
@@ -442,6 +444,242 @@ class TestTheReapAdoptsTheLastSnapshot:
 
 
 # --------------------------------------------------------------------------------------
+# The normalized row: both subjects, one shape
+# --------------------------------------------------------------------------------------
+
+class TestTheNormalizedRow:
+    def test_a_controller_row_keeps_its_whole_report(self):
+        """The normalization is additive, never lossy: everything with no executor
+        counterpart stays reachable in the passthrough."""
+        row = controller_row_to_performance_row({
+            "timestamp": NOW.isoformat(),
+            "bot_name": "bot-a",
+            "controller_id": "ctrl-1",
+            "status": "running",
+            "performance": {
+                "realized_pnl_quote": 3.0,
+                "unrealized_pnl_quote": 1.5,
+                "global_pnl_quote": 4.5,
+                "global_pnl_pct": 0.02,
+                "volume_traded": 1000.0,
+                "inventory_imbalance": -0.3,
+                "close_type_counts": {"TAKE_PROFIT": 2},
+            },
+            "custom_info": {"levels": 4},
+        })
+
+        assert row.subject == "controller"
+        assert row.scope_id == "ctrl-1"
+        assert row.bot_name == "bot-a"
+        assert (row.realized_pnl_quote, row.unrealized_pnl_quote) == (3.0, 1.5)
+        assert row.volume_quote == 1000.0
+        assert row.performance["inventory_imbalance"] == -0.3
+        assert row.custom_info == {"levels": 4}
+
+    def test_a_controller_reports_unknown_fees_not_zero_fees(self):
+        """PerformanceReport genuinely has no fees field. Zero and unknown are different
+        -- a consumer charting fees has to be able to tell."""
+        row = controller_row_to_performance_row({
+            "timestamp": NOW.isoformat(), "controller_id": "c", "status": "running",
+            "performance": {}, "custom_info": {},
+        })
+
+        assert row.cum_fees_quote is None
+
+    def test_a_live_executors_pnl_is_unrealized(self):
+        row = executor_row_to_performance_row(
+            ExecutorPerformanceRepository._to_dict(_snapshot(net_pnl="12.5", filled="4200", fees="1.8"))
+        )
+
+        assert row.subject == "executor"
+        assert row.scope_id == "e-1"
+        assert row.unrealized_pnl_quote == 12.5
+        assert row.realized_pnl_quote == 0.0
+        assert row.global_pnl_quote == 12.5
+        assert row.volume_quote == 4200.0
+        assert row.cum_fees_quote == 1.8
+        assert row.is_terminal is False
+
+    def test_a_settled_executors_pnl_is_realized(self):
+        row = executor_row_to_performance_row(
+            ExecutorPerformanceRepository._to_dict(
+                _snapshot(is_terminal=True, close_type="TAKE_PROFIT", net_pnl="12.5",
+                          status="TERMINATED")
+            )
+        )
+
+        assert row.realized_pnl_quote == 12.5
+        assert row.unrealized_pnl_quote == 0.0
+        assert row.is_terminal is True
+        assert row.close_type == "TAKE_PROFIT"
+
+    def test_a_held_position_is_not_counted_as_realized(self):
+        """POSITION_HOLD hands the position on to position_holds; counting it realized
+        here would double-count it -- the same exclusion get_performance_report applies."""
+        row = executor_row_to_performance_row(
+            ExecutorPerformanceRepository._to_dict(
+                _snapshot(is_terminal=True, close_type="POSITION_HOLD", net_pnl="12.5")
+            )
+        )
+
+        assert row.realized_pnl_quote == 0.0
+        assert row.unrealized_pnl_quote == 12.5
+
+    def test_an_executor_row_carries_no_heavy_passthrough(self):
+        row = executor_row_to_performance_row(
+            ExecutorPerformanceRepository._to_dict(_snapshot())
+        )
+
+        assert row.performance == {}
+        assert row.custom_info == {}
+
+    def test_both_subjects_produce_the_same_field_set(self):
+        """The whole point: a client writes seriesFor(scope) once."""
+        controller = controller_row_to_performance_row({
+            "timestamp": NOW.isoformat(), "controller_id": "c", "status": "running",
+            "performance": {}, "custom_info": {},
+        })
+        executor = executor_row_to_performance_row(
+            ExecutorPerformanceRepository._to_dict(_snapshot())
+        )
+
+        assert set(controller.model_dump()) == set(executor.model_dump())
+
+
+# --------------------------------------------------------------------------------------
+# The route: one URL, one envelope, and filters that belong to their subject
+# --------------------------------------------------------------------------------------
+
+def _client(controller_history=None, executor_history=None):
+    """The performance router alone, with both services stubbed."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    import routers.performance as performance_router
+    from deps import get_bots_orchestrator, get_executor_service
+
+    bots_manager = MagicMock()
+    executor_service = MagicMock()
+
+    async def _controllers(**kwargs):
+        bots_manager.last_call = kwargs
+        return controller_history or ([], None, False)
+
+    async def _executors(**kwargs):
+        executor_service.last_call = kwargs
+        return executor_history or ([], None, False)
+
+    bots_manager.get_controller_performance_history = _controllers
+    executor_service.get_executor_performance_history = _executors
+
+    app = FastAPI()
+    app.include_router(performance_router.router)
+    app.dependency_overrides[get_bots_orchestrator] = lambda: bots_manager
+    app.dependency_overrides[get_executor_service] = lambda: executor_service
+    return TestClient(app), bots_manager, executor_service
+
+
+class TestTheRoute:
+    def test_it_serves_the_executor_series_in_the_normalized_shape(self):
+        rows = [ExecutorPerformanceRepository._to_dict(_snapshot(net_pnl="12.5", filled="4200"))]
+        client, _, _ = _client(executor_history=(rows, "2026-09-01T11:59:00+00:00", True))
+
+        response = client.get("/performance/history", params={"subject": "executor", "executor_id": "e-1"})
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["status"] == "success"
+        assert body["data"][0]["subject"] == "executor"
+        assert body["data"][0]["scope_id"] == "e-1"
+        assert body["data"][0]["volume_quote"] == 4200.0
+        assert body["pagination"] == {
+            "next_cursor": "2026-09-01T11:59:00+00:00",
+            "has_more": True,
+            "limit": 100,
+            "interval": "5m",
+        }
+
+    def test_it_serves_the_controller_series_through_the_existing_query_path(self):
+        rows = [{
+            "timestamp": NOW.isoformat(), "bot_name": "bot-a", "controller_id": "c-1",
+            "status": "running",
+            "performance": {"global_pnl_quote": 4.5, "volume_traded": 1000.0},
+            "custom_info": {"levels": 4},
+        }]
+        client, bots_manager, _ = _client(controller_history=(rows, None, False))
+
+        response = client.get("/performance/history", params={"subject": "controller", "bot_name": "bot-a"})
+
+        assert response.status_code == 200
+        row = response.json()["data"][0]
+        assert row["subject"] == "controller"
+        assert row["global_pnl_quote"] == 4.5
+        assert row["cum_fees_quote"] is None
+        # Nothing dropped: the raw payloads are still there.
+        assert row["performance"]["volume_traded"] == 1000.0
+        assert row["custom_info"] == {"levels": 4}
+        assert bots_manager.last_call["bot_name"] == "bot-a"
+
+    def test_an_executor_filter_on_the_controller_subject_is_a_400(self):
+        """FastAPI cannot express this, so it is explicit: a filter aimed at the wrong
+        population would otherwise be accepted and silently ignored, which reads as an
+        empty result rather than a mistake."""
+        client, _, _ = _client()
+
+        response = client.get("/performance/history", params={"subject": "controller", "executor_id": "e-1"})
+
+        assert response.status_code == 400
+        assert "executor_id" in response.json()["detail"]
+
+    def test_a_bot_name_on_the_executor_subject_is_a_400(self):
+        """In-process executors have no bot; it would always match nothing."""
+        client, _, _ = _client()
+
+        response = client.get("/performance/history", params={"subject": "executor", "bot_name": "bot-a"})
+
+        assert response.status_code == 400
+        assert "bot_name" in response.json()["detail"]
+
+    def test_controller_id_is_legal_on_both_subjects(self):
+        """It filters WITHIN a subject. The two namespaces are not the same thing, which
+        is exactly why it is never a key to join them on."""
+        client, _, _ = _client()
+
+        for subject in ("controller", "executor"):
+            assert client.get(
+                "/performance/history", params={"subject": subject, "controller_id": "main"}
+            ).status_code == 200
+
+    def test_the_subject_is_required(self):
+        client, _, _ = _client()
+        assert client.get("/performance/history").status_code == 422
+
+    def test_the_limit_is_clamped_at_a_thousand(self):
+        client, _, _ = _client()
+        assert client.get(
+            "/performance/history", params={"subject": "executor", "limit": 1001}
+        ).status_code == 422
+
+    def test_one_minute_is_only_meaningful_on_the_executor_subject_but_accepted_on_both(self):
+        """`interval` is a floor: asking a 5-minute controller series for 1m returns its
+        native grain rather than an error."""
+        client, _, _ = _client()
+        assert client.get(
+            "/performance/history", params={"subject": "controller", "interval": "1m"}
+        ).status_code == 200
+
+    def test_a_malformed_timestamp_is_a_400_not_a_500(self):
+        client, _, _ = _client()
+
+        response = client.get(
+            "/performance/history", params={"subject": "executor", "start_time": "yesterday"}
+        )
+
+        assert response.status_code == 400
+        assert "Invalid datetime format" in response.json()["detail"]
+
+
+# --------------------------------------------------------------------------------------
 # The existing controller routes are untouched
 # --------------------------------------------------------------------------------------
 
@@ -457,6 +695,15 @@ class TestTheControllerPathIsUntouched:
         assert "interval_minutes <= 5" in source
         assert "interval_minutes // 5" in source
         assert "grain_minutes" not in source
+
+    def test_the_unified_route_reuses_the_controller_query_path(self):
+        """Sharing one call is what stops the two routes from ever drifting."""
+        import inspect
+
+        import routers.performance as performance_router
+
+        source = inspect.getsource(performance_router)
+        assert "get_controller_performance_history" in source
 
     def test_the_existing_controller_routes_still_answer_the_old_shape(self):
         import inspect
