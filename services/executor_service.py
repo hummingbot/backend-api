@@ -1248,8 +1248,6 @@ class ExecutorService:
         Returns:
             Dictionary with performance metrics ready for PerformanceReportResponse.
         """
-        import math
-
         report: Dict[str, Any] = {
             "controller_id": controller_id,
             "total_executors": 0,
@@ -1281,14 +1279,14 @@ class ExecutorService:
                 report["win_rate"] = db_data["win_rate"]
                 report["by_type"] = db_data["by_type"]
 
-                # Sharpe ratio: mean(pnl) / std(pnl), requires >= 2 values
-                pnl_values = db_data.get("pnl_values", [])
-                if len(pnl_values) >= 2:
-                    mean_pnl = sum(pnl_values) / len(pnl_values)
-                    variance = sum((v - mean_pnl) ** 2 for v in pnl_values) / (len(pnl_values) - 1)
-                    std_pnl = math.sqrt(variance)
-                    if std_pnl > 0:
-                        report["sharpe_ratio"] = round(mean_pnl / std_pnl, 4)
+                # Sharpe ratio: mean(pnl) / std(pnl). The repository returns the sample
+                # standard deviation as an aggregate -- None below 2 completed executors --
+                # so this never depends on the number of rows in the table.
+                pnl_std = db_data["pnl_std"]
+                completed_count = db_data["completed_count"]
+                if pnl_std:  # None below 2 executors, 0.0 when every PnL is identical
+                    mean_pnl = db_data["pnl_total_quote"] / completed_count
+                    report["sharpe_ratio"] = round(mean_pnl / pnl_std, 4)
 
             except Exception as e:
                 logger.error(f"Error generating performance report: {e}", exc_info=True)

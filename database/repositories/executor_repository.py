@@ -1,6 +1,7 @@
 """
 Repository for executor database operations.
 """
+import math
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
@@ -458,7 +459,11 @@ class ExecutorRepository:
         """Get a performance report, optionally filtered by controller_id.
 
         Returns aggregate metrics: total executors, PnL, fees, volume,
-        win rate, per-executor PnL list (for Sharpe), and breakdown by type.
+        win rate, PnL dispersion (for Sharpe), and breakdown by type.
+
+        Every metric is an aggregate: the number of rows this returns does not
+        grow with the size of the executors table. It is polled by the
+        `/ws/executors` performance push loop, once per interval per subscriber.
         """
         base_filter = []
         if controller_id:
@@ -486,6 +491,10 @@ class ExecutorRepository:
             func.coalesce(func.sum(ExecutorRecord.cum_fees_quote), Decimal(0)).label("fees"),
             func.coalesce(func.sum(ExecutorRecord.filled_amount_quote), Decimal(0)).label("vol"),
             func.coalesce(func.avg(ExecutorRecord.net_pnl_pct), Decimal(0)).label("pnl_pct_avg"),
+            func.coalesce(
+                func.sum(ExecutorRecord.net_pnl_quote * ExecutorRecord.net_pnl_quote),
+                Decimal(0),
+            ).label("pnl_sq"),
             func.count(ExecutorRecord.id).label("completed_count"),
             func.sum(case(
                 (ExecutorRecord.net_pnl_quote > 0, 1),
@@ -498,12 +507,19 @@ class ExecutorRepository:
         wins = agg_row.wins or 0
         win_rate = (wins / completed_count) if completed_count > 0 else 0.0
 
-        # --- Per-executor PnL list for Sharpe (excluding POSITION_HOLD) ---
-        pnl_list_stmt = select(ExecutorRecord.net_pnl_quote).where(
-            and_(*completed_filter)
-        )
-        pnl_rows = await self.session.execute(pnl_list_stmt)
-        pnl_values = [float(r[0] or 0) for r in pnl_rows]
+        # --- PnL dispersion for Sharpe, from the aggregates rather than the rows ---
+        # Sample standard deviation out of the count, the sum and the sum of squares the
+        # query above already carries. Fetching one net_pnl_quote per completed executor
+        # to do this in Python cost a full table scan on every poll of this report.
+        # NULL PnL counts as zero, as the old per-row list did: SUM skips it, COUNT does not.
+        # The moments stay Decimal until the square root: a large mean with a small spread
+        # loses its whole variance to cancellation if the subtraction is done in float.
+        pnl_std = None
+        if completed_count >= 2:
+            variance = (
+                agg_row.pnl_sq - agg_row.pnl * agg_row.pnl / completed_count
+            ) / (completed_count - 1)
+            pnl_std = math.sqrt(max(float(variance), 0.0))  # max() clamps noise at zero variance
 
         # --- Breakdown by executor type (also excluding POSITION_HOLD to match aggregate totals) ---
         type_stmt = select(
@@ -545,7 +561,8 @@ class ExecutorRepository:
             "fees_total_quote": float(agg_row.fees),
             "volume_total_quote": float(agg_row.vol),
             "win_rate": win_rate,
-            "pnl_values": pnl_values,
+            "completed_count": completed_count,
+            "pnl_std": pnl_std,
             "by_type": by_type,
         }
 
