@@ -85,11 +85,12 @@ def test_lp_rebalancer_reads_the_provider_it_was_given():
 
 
 def test_an_untyped_provider_is_refused_rather_than_guessed():
-    """Why the wheel dropped the default: Gateway 400s on a guessed trading type, so a
-    provider with no type has to fail at construction, not mid-operation."""
+    """Gateway 400s on a guessed trading type, so a provider with no type has to fail
+    before the bot runs, not mid-operation. The core's parse_provider defaults an untyped
+    provider to "router" — wrong branch entirely for an LP controller — so the config class
+    owns the contract and rejects it at load, whichever wheel is installed."""
     config_class = fs_util.load_controller_config_class("generic", "lp_rebalancer")
     fields = {**EXTRA_FIELDS["lp_rebalancer"], "lp_provider": "meteora"}
-    config = config_class(id="test", controller_name="lp_rebalancer", **fields)
 
     with pytest.raises(ValueError, match="expected 'name/type'"):
-        config.get_controller_class()(config, MagicMock(), MagicMock())
+        config_class(id="test", controller_name="lp_rebalancer", **fields)
