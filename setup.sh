@@ -775,6 +775,16 @@ TAILSCALE_HOSTNAME=$TAILSCALE_HOSTNAME
 # Directory holding archived backtest payloads (inside the bots volume, so it
 # survives redeploys).
 #BACKTESTING_RESULTS_PATH=bots/data/backtests
+# Directory holding downloaded candle history shared by backtest workers, so a
+# sweep of configs over one market downloads that market once.
+#BACKTESTING_CANDLES_CACHE_PATH=bots/data/backtests/candles
+# How many downloaded candle ranges to keep; the least recently used are dropped
+# past it. 0 disables the cache and makes every run download its own history.
+#BACKTESTING_CANDLES_CACHE_ENTRIES=32
+# How long a downloaded candle range may be reused. A window ending near now is
+# fetched with its last candle still forming, so an entry is refetched once it is
+# older than this.
+#BACKTESTING_CANDLES_CACHE_TTL_SECONDS=3600.0
 
 # Market data feeds
 # How often to run feed cleanup, in seconds.

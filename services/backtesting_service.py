@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from config import settings
+from services.candles_cache import CandlesCache, cache_key
 
 logger = logging.getLogger(__name__)
 
@@ -93,9 +94,12 @@ class BacktestTimeout(Exception):
 #
 # Everything below runs in the child. The engine is built there and dies with it, so each
 # run owns its BacktestingEngineBase outright: the shared-instance race CORR-060 closed with
-# a lock cannot occur across processes at all. The cost is that the per-instance
-# BacktestingDataProvider.candles_feeds cache no longer spans runs and candles are downloaded
-# once per backtest; a shared candle cache is the follow-up, not something to fake here.
+# a lock cannot occur across processes at all. What that isolation used to cost was the
+# per-instance BacktestingDataProvider.candles_feeds cache, which made every run re-download
+# its full candle history; the download now goes through a process-external store of the
+# candle data itself (services/candles_cache.py), so a sweep over one market downloads once.
+# The store holds frames, never an engine or a provider, and hands each reader its own copy
+# -- so nothing mutable is reachable from two runs and CORR-060's guarantee is untouched.
 
 
 def _shape_result(backtesting_results: dict) -> dict:
@@ -132,13 +136,74 @@ def _shape_result(backtesting_results: dict) -> dict:
     }
 
 
-def _run_backtest_blocking(config: dict, controllers_path: str, controllers_module: str) -> dict:
+def _default_candles_cache() -> CandlesCache:
+    return CandlesCache(
+        path=settings.backtesting.candles_cache_path,
+        max_entries=settings.backtesting.candles_cache_entries,
+        ttl_seconds=settings.backtesting.candles_cache_ttl_seconds,
+    )
+
+
+def _install_candle_cache(provider, cache: CandlesCache) -> None:
+    """Route this run's candle downloads through the shared store.
+
+    The engine builds its own BacktestingDataProvider and hands it to the controller, so
+    wrapping the instance's get_candles_feed catches every download the run makes -- the
+    backtesting-resolution feed and each of the controller's own.
+
+    The key is the whole of what the download depends on: the market, the interval, the
+    max_records that sets how far before the window the fetch reaches back, and the run's
+    window itself. An entry is therefore only ever served to a request for exactly the range
+    it holds; a wider or shifted window misses and is fetched.
+
+    `loaded` is this run's own memo, so a controller asking twice for the same feed does not
+    re-read the file. It is a local, lives as long as the call chain that made it, and is
+    never seen by another run -- the cache deliberately keeps no cross-run object graph.
+    """
+    download = provider.get_candles_feed
+    loaded = {}
+
+    async def get_candles_feed(config):
+        key = cache_key(
+            config.connector, config.trading_pair, config.interval, config.max_records,
+            provider.start_time, provider.end_time,
+        )
+        frame = loaded.get(key)
+        if frame is None:
+            frame = cache.get(key)
+        if frame is None:
+            # Whoever waits here finds the entry the first one wrote, so N workers that miss
+            # together still download once -- the check-then-fetch race CORR-061 closed for
+            # live feeds, in its offline form.
+            with cache.single_flight(key):
+                frame = cache.get(key)
+                if frame is None:
+                    feed_key = provider._generate_candle_feed_key(config)
+                    held = provider.candles_feeds.get(feed_key)
+                    frame = await download(config)
+                    # Upstream answers from its own in-run dict whenever a feed it already
+                    # holds spans the window, whatever max_records was asked for. Such a
+                    # frame was fetched for a different request, so storing it here would
+                    # let a later run be served less history than it asked for. Only what
+                    # was genuinely downloaded is worth keeping.
+                    if frame is not held:
+                        cache.put(key, frame)
+        loaded[key] = frame
+        provider.candles_feeds[provider._generate_candle_feed_key(config)] = frame
+        return frame
+
+    provider.get_candles_feed = get_candles_feed
+
+
+def _run_backtest_blocking(config: dict, controllers_path: str, controllers_module: str,
+                           cache: Optional[CandlesCache] = None) -> dict:
     """Build the controller config, run the simulation to completion, shape the payload."""
     # Imported here rather than at module scope so only a process that actually backtests
     # pays for pulling in hummingbot.
     from hummingbot.strategy_v2.backtesting.backtesting_engine_base import BacktestingEngineBase
 
     engine = BacktestingEngineBase()
+    _install_candle_cache(engine.backtesting_data_provider, cache if cache is not None else _default_candles_cache())
     if isinstance(config["config"], str):
         controller_config = engine.get_controller_config_instance_from_yml(
             config_path=config["config"],

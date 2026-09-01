@@ -257,6 +257,24 @@ class BacktestingSettings(BaseSettings):
         default="bots/data/backtests",
         description="Directory holding archived backtest payloads (inside the bots volume, so it survives redeploys)"
     )
+    candles_cache_path: str = Field(
+        default="bots/data/backtests/candles",
+        description="Directory holding downloaded candle history shared by backtest workers"
+    )
+    candles_cache_entries: int = Field(
+        default=32,
+        description=(
+            "How many downloaded candle ranges to keep; the least recently used are dropped past it. "
+            "0 disables the cache and makes every run download its own history again"
+        )
+    )
+    candles_cache_ttl_seconds: float = Field(
+        default=3600.0,
+        description=(
+            "How long a downloaded candle range may be reused. A window ending near now is fetched "
+            "with its last candle still forming, so an entry is refetched once it is older than this"
+        )
+    )
 
     model_config = SettingsConfigDict(env_prefix="BACKTESTING_", extra="ignore")
 
