@@ -20,15 +20,12 @@ events only; their holdings are the LP token balance, read live from Gateway. Th
 position_address, and Gateway rejects positions-owned for them with a 400, surfaced as-is.
 """
 import logging
-from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from database import AsyncDatabaseManager
-from database.repositories import GatewayAMMRepository
 from database.repositories.gateway_amm_repository import has_nft_positions
-from deps import get_accounts_service, get_database_manager, require_gateway_online
+from deps import get_accounts_service, get_gateway_amm_service, require_gateway_online
 from models import (
     AMMAddLiquidityRequest,
     AMMCreatePoolRequest,
@@ -49,7 +46,8 @@ from routers.gateway_extras import (
     validate_extra_params,
 )
 from services.accounts_service import AccountsService
-from services.gateway_client import GatewayError, check_gateway_error, get_native_gas_token
+from services.gateway_amm_service import GatewayAMMService
+from services.gateway_client import GatewayError, check_gateway_error
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +93,7 @@ async def _read_pool(
 
 async def _book_position_add(
     accounts_service: AccountsService,
-    db_manager: AsyncDatabaseManager,
+    amm_service: GatewayAMMService,
     request: AMMAddLiquidityRequest,
     wallet_address: str,
     position_address: str,
@@ -103,60 +101,29 @@ async def _book_position_add(
     pool_info: Dict[str, Any],
     price: Optional[float],
 ) -> None:
-    """Create or top up the DAMM v2 position row for a confirmed add."""
-    base_added = data.get("baseTokenAmountAdded") or 0
-    quote_added = data.get("quoteTokenAmountAdded") or 0
-    # Rent is locked, not spent: the chain returns it when the position account closes,
-    # and Gateway reports it separately for exactly that reason. Recorded here so the
-    # close can be checked against it — a refund smaller than what was locked means an
-    # account was left behind. Present only when this add opened the position; adding to
-    # one that already exists locks no further rent.
-    position_rent = data.get("positionRent")
+    """Pull the add's amounts out of Gateway's response and hand them to the service.
 
-    try:
-        async with db_manager.get_session_context() as session:
-            repo = GatewayAMMRepository(session)
-            existing = await repo.get_position_by_address(position_address)
-            if existing:
-                await repo.add_to_position_amounts(
-                    position_address=position_address,
-                    base_delta=Decimal(str(base_added)),
-                    quote_delta=Decimal(str(quote_added)),
-                    entry_price=Decimal(str(price)) if price else None,
-                )
-                if existing.status == "CLOSED":
-                    existing.status = "OPEN"
-                    existing.closed_at = None
-            else:
-                chain, network_name = request.network.split("-", 1)
-                base_symbol = await accounts_service.gateway_client.resolve_token_symbol(
-                    chain, network_name, pool_info.get("baseTokenAddress", ""))
-                quote_symbol = await accounts_service.gateway_client.resolve_token_symbol(
-                    chain, network_name, pool_info.get("quoteTokenAddress", ""))
-                await repo.create_position({
-                    "position_address": position_address,
-                    "pool_address": request.pool_address,
-                    "connector": request.connector.split("/")[0],
-                    "network": request.network,
-                    "wallet_address": wallet_address,
-                    "base_token": base_symbol,
-                    "quote_token": quote_symbol,
-                    "trading_pair": f"{base_symbol}-{quote_symbol}",
-                    "initial_base_token_amount": base_added,
-                    "initial_quote_token_amount": quote_added,
-                    "base_token_amount": base_added,
-                    "quote_token_amount": quote_added,
-                    "position_rent": Decimal(str(position_rent)) if position_rent is not None else None,
-                    "entry_price": price,
-                    "current_price": price,
-                })
-        logger.info(f"Booked AMM position {position_address}: +{base_added} base, +{quote_added} quote")
-    except Exception as db_error:
-        logger.error(f"Error booking AMM position {position_address}: {db_error}", exc_info=True)
+    Reading the response is the router's job; what row the position becomes is the
+    service's. ``positionRent`` is present only when this add opened the position.
+    """
+    await amm_service.record_position_add(
+        gateway_client=accounts_service.gateway_client,
+        position_address=position_address,
+        pool_address=request.pool_address,
+        connector=request.connector,
+        network=request.network,
+        wallet_address=wallet_address,
+        base_amount_added=data.get("baseTokenAmountAdded"),
+        quote_amount_added=data.get("quoteTokenAmountAdded"),
+        position_rent=data.get("positionRent"),
+        price=price,
+        base_token_address=pool_info.get("baseTokenAddress", ""),
+        quote_token_address=pool_info.get("quoteTokenAddress", ""),
+    )
 
 
 async def _record_event(
-    db_manager: AsyncDatabaseManager,
+    amm_service: GatewayAMMService,
     result: Dict[str, Any],
     *,
     event_type: str,
@@ -169,42 +136,33 @@ async def _record_event(
     quote_amount_key: str,
     price: Optional[float] = None,
 ) -> str:
-    """Persist one AMM write and return its status in hapi's vocabulary.
+    """Hand one AMM write to the service and return its status in hapi's vocabulary.
 
-    Amounts come from Gateway's `data`, present only once it confirmed the tx; a
-    submitted-not-confirmed write records the status with null amounts rather than
-    inventing figures. Recording never fails the operation — the liquidity has already
-    moved by the time we get here, so a database problem must not surface as a failed
-    write to the caller.
+    Gateway's response shape is parsed here — the amount keys differ per event type and
+    ``data`` is present only once it confirmed the tx, so a submitted-not-confirmed write
+    is recorded with null amounts rather than invented figures. Recording never fails the
+    operation; the service owns that policy.
     """
     tx_status = get_transaction_status_from_response(result)
-    # "" rather than None: the column is not nullable, and a write whose id Gateway
-    # withheld is still worth recording — unlike the routes above, this one never
-    # fails the operation over a missing hash.
-    transaction_hash = get_transaction_hash_from_response(result) or ""
     data = result.get("data") or {}
-    chain, _ = network.split("-", 1) if "-" in network else (network, "")
 
-    try:
-        async with db_manager.get_session_context() as session:
-            await GatewayAMMRepository(session).create_event({
-                "transaction_hash": transaction_hash,
-                "connector": connector,
-                "network": network,
-                "wallet_address": wallet_address,
-                "pool_address": pool_address,
-                "position_address": position_address,
-                "event_type": event_type,
-                "base_token_amount": data.get(base_amount_key),
-                "quote_token_amount": data.get(quote_amount_key),
-                "price": price,
-                "gas_fee": data.get("fee"),
-                "gas_token": get_native_gas_token(chain) if data.get("fee") is not None else None,
-                "status": tx_status,
-            })
-        logger.info(f"Recorded AMM {event_type}: {transaction_hash} (status: {tx_status})")
-    except Exception as db_error:
-        logger.error(f"Error recording AMM {event_type} event: {db_error}", exc_info=True)
+    await amm_service.record_event(
+        # "" rather than None: the column is not nullable, and a write whose id Gateway
+        # withheld is still worth recording — unlike the routes above, this one never
+        # fails the operation over a missing hash.
+        transaction_hash=get_transaction_hash_from_response(result) or "",
+        event_type=event_type,
+        connector=connector,
+        network=network,
+        wallet_address=wallet_address,
+        pool_address=pool_address,
+        position_address=position_address,
+        base_token_amount=data.get(base_amount_key),
+        quote_token_amount=data.get(quote_amount_key),
+        price=price,
+        gas_fee=data.get("fee"),
+        tx_status=tx_status,
+    )
 
     return tx_status
 
@@ -213,7 +171,7 @@ async def _record_event(
 
 
 async def _record_failed_event(
-    db_manager: AsyncDatabaseManager,
+    amm_service: GatewayAMMService,
     error: Exception,
     *,
     event_type: str,
@@ -223,42 +181,23 @@ async def _record_failed_event(
     pool_address: str,
     position_address: Optional[str] = None,
 ) -> None:
-    """Record a write that reached the chain and reverted, before the error is re-raised.
+    """Pull the transaction id out of a Gateway failure and hand it to the service.
 
-    `_record_event` above only runs when Gateway *returns*. A transaction that landed and
-    reverted does not return: Gateway raises, the client turns it into a GatewayError, and
-    control skips the whole recording block. That is why every row in both event tables
-    read CONFIRMED with no error_message — not because nothing had ever failed, but
-    because a failure could not be written.
-
-    Only failures carrying a transaction id are recorded: a pre-flight simulation failure
-    never got one and cost nothing, while a landed revert has one and paid gas. Recording
-    never masks the original failure.
+    A write that landed on-chain and reverted does not return: Gateway raises, and the
+    transaction id survives only inside the error message. Parsing it is the router's job
+    (one parser, shared with the success paths); deciding what row it becomes is the
+    service's.
     """
-    transaction_hash = transaction_id_from_error(error)
-    if not transaction_hash:
-        return
-
-    chain, _ = network.split("-", 1) if "-" in network else (network, "")
-    try:
-        async with db_manager.get_session_context() as session:
-            await GatewayAMMRepository(session).create_event({
-                "transaction_hash": transaction_hash,
-                "connector": connector,
-                "network": network,
-                "wallet_address": wallet_address,
-                "pool_address": pool_address,
-                "position_address": position_address,
-                "event_type": event_type,
-                "status": "FAILED",
-                "error_message": str(error),
-            })
-        logger.error(
-            f"AMM {event_type} {transaction_hash} landed on-chain and FAILED on {connector}/"
-            f"{network}; recorded. {error}"
-        )
-    except Exception as db_error:
-        logger.error(f"Error recording failed AMM {event_type}: {db_error}", exc_info=True)
+    await amm_service.record_failed_event(
+        transaction_hash=transaction_id_from_error(error),
+        error=error,
+        event_type=event_type,
+        connector=connector,
+        network=network,
+        wallet_address=wallet_address,
+        pool_address=pool_address,
+        position_address=position_address,
+    )
 
 
 @router.get(
@@ -391,7 +330,7 @@ async def quote_amm_liquidity(
 async def add_amm_liquidity(
     request: AMMAddLiquidityRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    amm_service: GatewayAMMService = Depends(get_gateway_amm_service),
 ):
     """
     Add two-sided liquidity to an AMM pool.
@@ -432,11 +371,11 @@ async def add_amm_liquidity(
                 position_address = data.get("positionAddress")
             if position_address:
                 await _book_position_add(
-                    accounts_service, db_manager, request, wallet_address, position_address,
+                    accounts_service, amm_service, request, wallet_address, position_address,
                     data, pool_info, price)
 
         tx_status = await _record_event(
-            db_manager, result,
+            amm_service, result,
             event_type="ADD_LIQUIDITY", connector=request.connector, network=request.network,
             wallet_address=wallet_address, pool_address=request.pool_address,
             position_address=position_address,
@@ -448,7 +387,7 @@ async def add_amm_liquidity(
         raise
     except GatewayError as e:
         await _record_failed_event(
-            db_manager, e, event_type="ADD_LIQUIDITY", connector=request.connector,
+            amm_service, e, event_type="ADD_LIQUIDITY", connector=request.connector,
             network=request.network, wallet_address=wallet_address,
             pool_address=request.pool_address, position_address=request.position_address,
         )
@@ -464,7 +403,7 @@ async def add_amm_liquidity(
 async def remove_amm_liquidity(
     request: AMMRemoveLiquidityRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    amm_service: GatewayAMMService = Depends(get_gateway_amm_service),
 ):
     """
     Remove liquidity from an AMM pool.
@@ -490,32 +429,16 @@ async def remove_amm_liquidity(
 
         if (get_transaction_status_from_response(result) == "CONFIRMED"
                 and has_nft_positions(request.connector) and request.position_address):
-            try:
-                async with db_manager.get_session_context() as session:
-                    repo = GatewayAMMRepository(session)
-                    position = await repo.subtract_from_position_amounts(
-                        position_address=request.position_address,
-                        base_delta=Decimal(str(data.get("baseTokenAmountRemoved") or 0)),
-                        quote_delta=Decimal(str(data.get("quoteTokenAmountRemoved") or 0)),
-                    )
-                    # A 100% remove is the close: Gateway closes the position account in
-                    # the same transaction, which is what returns its rent. There is no
-                    # separate close route, and positionRentRefunded arrives only on this
-                    # path — a partial removal leaves the account open and refunds
-                    # nothing, so its absence there is a fact rather than a gap.
-                    if position and float(request.percentage_to_remove) >= 100:
-                        rent_refunded = data.get("positionRentRefunded")
-                        await repo.close_position(
-                            request.position_address,
-                            position_rent_refunded=(Decimal(str(rent_refunded))
-                                                    if rent_refunded is not None else None),
-                        )
-            except Exception as db_error:
-                logger.error(f"Error booking AMM removal for {request.position_address}: "
-                             f"{db_error}", exc_info=True)
+            await amm_service.record_position_remove(
+                position_address=request.position_address,
+                base_amount_removed=data.get("baseTokenAmountRemoved"),
+                quote_amount_removed=data.get("quoteTokenAmountRemoved"),
+                percentage_to_remove=float(request.percentage_to_remove),
+                position_rent_refunded=data.get("positionRentRefunded"),
+            )
 
         tx_status = await _record_event(
-            db_manager, result,
+            amm_service, result,
             event_type="REMOVE_LIQUIDITY", connector=request.connector, network=request.network,
             wallet_address=wallet_address, pool_address=request.pool_address,
             position_address=request.position_address,
@@ -527,7 +450,7 @@ async def remove_amm_liquidity(
         raise
     except GatewayError as e:
         await _record_failed_event(
-            db_manager, e, event_type="REMOVE_LIQUIDITY", connector=request.connector,
+            amm_service, e, event_type="REMOVE_LIQUIDITY", connector=request.connector,
             network=request.network, wallet_address=wallet_address,
             pool_address=request.pool_address, position_address=request.position_address,
         )
@@ -548,7 +471,7 @@ async def remove_amm_liquidity(
 async def create_amm_pool(
     request: AMMCreatePoolRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    amm_service: GatewayAMMService = Depends(get_gateway_amm_service),
 ):
     """
     Create and seed a new AMM pool.
@@ -582,7 +505,7 @@ async def create_amm_pool(
         # The pool address only exists in the response, so it is read from there
         # rather than the request, which names tokens.
         tx_status = await _record_event(
-            db_manager, result,
+            amm_service, result,
             event_type="CREATE_POOL", connector=request.connector, network=request.network,
             wallet_address=wallet_address,
             pool_address=result.get("poolAddress") or result.get("pool_address") or "",
@@ -613,7 +536,7 @@ async def search_amm_events(
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    amm_service: GatewayAMMService = Depends(get_gateway_amm_service),
 ):
     """
     Search recorded AMM liquidity writes, newest first.
@@ -623,19 +546,11 @@ async def search_amm_events(
     /gateway/amm/position-info, which is the only authority on them.
     """
     try:
-        async with db_manager.get_session_context() as session:
-            repo = GatewayAMMRepository(session)
-            events = await repo.search_events(
-                connector=connector, network=network, wallet_address=wallet_address,
-                pool_address=pool_address, event_type=event_type, status=status,
-                limit=min(limit, 1000), offset=offset,
-            )
-            return {
-                "data": [repo.event_to_dict(event) for event in events],
-                "total_count": len(events),
-                "limit": limit,
-                "offset": offset,
-            }
+        return await amm_service.search_events(
+            connector=connector, network=network, wallet_address=wallet_address,
+            pool_address=pool_address, event_type=event_type, status=status,
+            limit=limit, offset=offset,
+        )
     except Exception as e:
         logger.error(f"Error searching AMM events: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error searching AMM events: {str(e)}")
@@ -650,7 +565,7 @@ async def search_amm_positions(
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    amm_service: GatewayAMMService = Depends(get_gateway_amm_service),
 ):
     """
     Search tracked AMM positions (Meteora DAMM v2 NFTs), newest first.
@@ -659,18 +574,10 @@ async def search_amm_positions(
     come from /gateway/amm/position-info and their history from /gateway/amm/events/search.
     """
     try:
-        async with db_manager.get_session_context() as session:
-            repo = GatewayAMMRepository(session)
-            positions = await repo.search_positions(
-                connector=connector, network=network, wallet_address=wallet_address,
-                pool_address=pool_address, status=status, limit=min(limit, 1000), offset=offset,
-            )
-            return {
-                "data": [repo.position_to_dict(position) for position in positions],
-                "total_count": len(positions),
-                "limit": limit,
-                "offset": offset,
-            }
+        return await amm_service.search_positions(
+            connector=connector, network=network, wallet_address=wallet_address,
+            pool_address=pool_address, status=status, limit=limit, offset=offset,
+        )
     except Exception as e:
         logger.error(f"Error searching AMM positions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error searching AMM positions: {str(e)}")

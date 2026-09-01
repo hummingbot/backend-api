@@ -535,6 +535,23 @@ class BotsOrchestrator:
                 return None
             return self._serialize_bot_run(bot_run)
 
+    async def delete_bot_runs_for_bot(self, bot_name: str) -> int:
+        """Delete every bot run recorded under a bot name, returning how many went.
+
+        Best-effort: the caller has already deleted the archived bot's files by the time
+        this runs, so a database problem must not report that deletion as a failure.
+        """
+        try:
+            async with self.db_manager.get_session_context() as session:
+                bot_run_repo = BotRunRepository(session)
+                deleted = await bot_run_repo.delete_bot_runs_by_bot_name(bot_name)
+                if deleted > 0:
+                    logger.info(f"Deleted {deleted} bot run record(s) for '{bot_name}'")
+                return deleted
+        except Exception as e:
+            logger.warning(f"Failed to clean bot run records for '{bot_name}': {e}")
+            return 0
+
     async def delete_bot_run(self, bot_run_id: int) -> Optional[Dict]:
         """Delete a bot run record and its archived folder.
 
