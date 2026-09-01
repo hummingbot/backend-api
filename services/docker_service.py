@@ -11,6 +11,7 @@ from docker.types import LogConfig
 
 from config import settings
 from models import V2ControllerDeployment
+from models.bot_orchestration import validate_safe_config_name
 from utils.file_system import fs_util
 from utils.gateway_certs import ensure_gateway_certs, gateway_certs_dir
 
@@ -226,10 +227,29 @@ class DockerService:
                         os.makedirs(destination_controllers_config_dir, exist_ok=True)
 
                         for controller_file in controllers_list:
-                            source_controller_file = os.path.join(controllers_config_dir, controller_file)
-                            destination_controller_file = os.path.join(
-                                destination_controllers_config_dir, controller_file
-                            )
+                            # SEC-058: the controllers list is read back from an attacker-controllable
+                            # YAML file, so it never went through the request-body validators. Validate
+                            # each entry as a single safe path component and, as defense in depth,
+                            # verify both resolved paths stay inside their base directories.
+                            try:
+                                if not isinstance(controller_file, str):
+                                    raise ValueError(
+                                        f"Invalid controllers_config entry: {controller_file!r} is not a string."
+                                    )
+                                validate_safe_config_name(controller_file, "controllers_config")
+                                source_controller_file = self._ensure_contained(
+                                    os.path.join(controllers_config_dir, controller_file),
+                                    controllers_config_dir,
+                                    "controllers_config",
+                                )
+                                destination_controller_file = self._ensure_contained(
+                                    os.path.join(destination_controllers_config_dir, controller_file),
+                                    destination_controllers_config_dir,
+                                    "controllers_config",
+                                )
+                            except ValueError as e:
+                                logger.warning(f"Skipping unsafe controller config entry {controller_file!r}: {e}")
+                                continue
 
                             if os.path.exists(source_controller_file):
                                 shutil.copy2(source_controller_file, destination_controller_file)

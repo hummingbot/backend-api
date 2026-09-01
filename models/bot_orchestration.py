@@ -18,7 +18,7 @@ def _validate_safe_name(name: str, label: str) -> str:
     return name
 
 
-def _validate_safe_config_name(name: str, label: str) -> str:
+def validate_safe_config_name(name: str, label: str) -> str:
     """Validate a config file name, ignoring an optional .yml extension before checking the base name."""
     base_name = name[:-4] if name.endswith(".yml") else name
     _validate_safe_name(base_name, label)
@@ -140,7 +140,7 @@ class V2ScriptDeployment(BaseModel):
     def _validate_script_config(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        return _validate_safe_config_name(v, "script_config")
+        return validate_safe_config_name(v, "script_config")
 
 
 class V2ControllerDeployment(BaseModel):
@@ -173,11 +173,11 @@ class V2ControllerDeployment(BaseModel):
     @field_validator("controllers_config")
     @classmethod
     def _validate_controllers_config(cls, v: List[str]) -> List[str]:
-        return [_validate_safe_config_name(controller, "controllers_config") for controller in v]
+        return [validate_safe_config_name(controller, "controllers_config") for controller in v]
 
     @field_validator("script_config")
     @classmethod
     def _validate_script_config(cls, v: Optional[str]) -> Optional[str]:
         if v is None:
             return v
-        return _validate_safe_config_name(v, "script_config")
+        return validate_safe_config_name(v, "script_config")
