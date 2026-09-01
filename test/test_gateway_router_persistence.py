@@ -484,6 +484,79 @@ def test_close_writes_its_event_and_closes_the_row_once_gateway_agrees(monkeypat
     }
 
 
+def test_close_releases_the_session_before_waiting_for_propagation(monkeypatch):
+    """The two-second propagation wait must not hold a pooled connection.
+
+    The close path books the fees, lets the session go, waits, and only then opens a
+    second short session to mark the row CLOSED. Holding one connection idle per
+    close is how a fleet closing several positions at once drains the pool while the
+    database has nothing to do (PERF-105).
+    """
+    import services.gateway_clmm_service as service_module
+
+    depth = []       # sessions currently open
+    timeline = []    # what happened, in order
+    sessions_open_during_sleep = []
+
+    @asynccontextmanager
+    async def session_context():
+        depth.append(1)
+        timeline.append("session_open")
+        try:
+            yield object()
+        finally:
+            depth.pop()
+            timeline.append("session_close")
+
+    async def fake_sleep(_seconds):
+        timeline.append("sleep")
+        sessions_open_during_sleep.append(len(depth))
+
+    monkeypatch.setattr(service_module.asyncio, "sleep", fake_sleep)
+
+    calls = RepoCalls()
+    accounts_service = _accounts_service(
+        clmm_positions_owned=[{"address": POSITION, "baseFeeAmount": 0.01,
+                               "quoteFeeAmount": 2.0, "price": 198.0}],
+        clmm_close_position={
+            "signature": SIGNATURE,
+            "status": 1,
+            "data": {
+                "baseTokenAmountRemoved": 0.0099,
+                "quoteTokenAmountRemoved": 1.98,
+                "baseFeeAmountCollected": 0.01,
+                "quoteFeeAmountCollected": 2.0,
+                "positionRentRefunded": 0.05788,
+                "fee": 0.000011,
+            },
+        },
+        clmm_position_info={"error": "Position not found", "status": 404},
+    )
+    service = GatewayCLMMService(db_manager=SimpleNamespace(get_session_context=session_context))
+    service.repository_class = _repo_class(calls, position=_stored_position())
+    client = _client(accounts_service, clmm_service=service)
+
+    response = client.post("/gateway/clmm/close", json={
+        "connector": "meteora",
+        "network": "solana-mainnet-beta",
+        "position_address": POSITION,
+    })
+    assert response.status_code == 200
+
+    # No connection was checked out while we waited on the chain.
+    assert sessions_open_during_sleep == [0]
+    # The bookkeeping commits, then the wait, then a second session for the close.
+    # (Earlier pairs belong to the route's own wallet lookup, before the close.)
+    assert timeline.count("sleep") == 1
+    assert timeline[-3:] == ["sleep", "session_open", "session_close"]
+    # And the same rows still land, in the same order.
+    assert calls.names()[-5:] == [
+        "get_position_by_address", "create_event",
+        "update_position_fees", "update_position_liquidity",
+        "close_position",
+    ]
+
+
 def test_a_failed_close_mutates_nothing_but_still_files_the_event():
     calls = RepoCalls()
     accounts_service = _accounts_service(

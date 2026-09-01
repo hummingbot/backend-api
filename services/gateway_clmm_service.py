@@ -508,7 +508,7 @@ class GatewayCLMMService(RepositoryService):
             # unconditional booking permanently inflated *_fee_collected on
             # failed closes.
             if tx_status != "CONFIRMED":
-                return
+                return False
 
             new_base_collected = Decimal(str(position.base_fee_collected)) + base_fee_collected
             new_quote_collected = Decimal(str(position.quote_fee_collected)) + quote_fee_collected
@@ -530,45 +530,58 @@ class GatewayCLMMService(RepositoryService):
                     current_price=Decimal(str(close_price))
                 )
 
-            # Verify position is actually gone on Gateway before marking
-            # CLOSED (some connectors 500 instead of 404 for a
-            # nonexistent position — right after our own close, either
-            # means gone).
-            try:
-                await asyncio.sleep(2)  # Wait for transaction to propagate
+            return True
 
-                verify_result = await gateway_client.clmm_position_info(
-                    connector=connector,
-                    chain_network=network,
-                    position_address=position_address
-                )
+        booked = await self._in_repo_best_effort(
+            _fn, error_message="Error recording CLOSE event", default=False
+        )
+        if not booked:
+            return
 
-                if verify_result and isinstance(verify_result, dict) and "error" in verify_result:
-                    status_code = verify_result.get("status")
-                    if status_code in (404, 500):
+        # The propagation wait happens with no session held: the writes above are
+        # committed and the pooled connection is back before we sit idle for two
+        # seconds, so a fleet closing positions at once cannot drain the pool
+        # waiting on the chain.
+        #
+        # Verify position is actually gone on Gateway before marking CLOSED (some
+        # connectors 500 instead of 404 for a nonexistent position — right after our
+        # own close, either means gone).
+        try:
+            await asyncio.sleep(2)  # Wait for transaction to propagate
+
+            verify_result = await gateway_client.clmm_position_info(
+                connector=connector,
+                chain_network=network,
+                position_address=position_address
+            )
+
+            if verify_result and isinstance(verify_result, dict) and "error" in verify_result:
+                status_code = verify_result.get("status")
+                if status_code in (404, 500):
+                    async def _close(clmm_repo):
                         await clmm_repo.close_position(
                             position_address,
                             position_rent_refunded=(Decimal(str(position_rent_refunded))
                                                     if position_rent_refunded is not None else None)
                         )
-                        logger.info(f"Position {position_address} verified as closed "
-                                    f"(Gateway returned {status_code})")
-                    else:
-                        logger.warning(f"Unexpected error verifying position close: {verify_result}")
-                elif verify_result and "address" in verify_result:
-                    # Position still exists - might be a failed close or delayed propagation
-                    logger.warning(f"Position {position_address} still exists after close "
-                                   "transaction. Will be handled by poller.")
+
+                    await self._in_repo(_close)
+                    logger.info(f"Position {position_address} verified as closed "
+                                f"(Gateway returned {status_code})")
                 else:
-                    logger.debug("Could not verify position close status, will be handled by poller")
+                    logger.warning(f"Unexpected error verifying position close: {verify_result}")
+            elif verify_result and "address" in verify_result:
+                # Position still exists - might be a failed close or delayed propagation
+                logger.warning(f"Position {position_address} still exists after close "
+                               "transaction. Will be handled by poller.")
+            else:
+                logger.debug("Could not verify position close status, will be handled by poller")
 
-            except Exception as verify_error:
-                logger.warning(f"Error verifying position close: {verify_error}. Will be handled by poller.")
+        except Exception as verify_error:
+            logger.warning(f"Error verifying position close: {verify_error}. Will be handled by poller.")
 
-            logger.info(f"Updated position {position_address}: "
-                        "collected fees updated, pending fees reset to 0.")
-
-        await self._in_repo_best_effort(_fn, error_message="Error recording CLOSE event")
+        logger.info(f"Updated position {position_address}: "
+                    "collected fees updated, pending fees reset to 0.")
 
     async def record_collect_fees(
         self,
