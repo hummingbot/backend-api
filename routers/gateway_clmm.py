@@ -33,6 +33,7 @@ from models import (
 )
 from routers.gateway_extras import (
     ExtraParamsSpec,
+    get_transaction_hash_from_response,
     get_transaction_status_from_response,
     transaction_id_from_error,
     validate_extra_params,
@@ -501,9 +502,9 @@ async def open_clmm_position(
             extra_params=request.extra_params
         ))
 
-        transaction_hash = result.get("signature")
+        transaction_hash = get_transaction_hash_from_response(result)
         if not transaction_hash:
-            raise HTTPException(status_code=500, detail="No transaction signature returned from Gateway")
+            raise HTTPException(status_code=500, detail="No transaction hash returned from Gateway")
 
         # Gateway's OpenPositionResponse carries position details only inside `data`,
         # which is present only for CONFIRMED transactions (the response schema strips
@@ -697,7 +698,7 @@ async def add_liquidity_to_clmm_position(
             extra_params=request.extra_params
         ))
 
-        transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
+        transaction_hash = get_transaction_hash_from_response(result)
         if not transaction_hash:
             raise HTTPException(status_code=500, detail="No transaction hash returned from Gateway")
 
@@ -845,7 +846,7 @@ async def remove_liquidity_from_clmm_position(
             slippage_pct=float(request.slippage_pct) if request.slippage_pct is not None else None
         ))
 
-        transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
+        transaction_hash = get_transaction_hash_from_response(result)
         if not transaction_hash:
             raise HTTPException(status_code=500, detail="No transaction hash returned from Gateway")
 
@@ -1005,7 +1006,7 @@ async def close_clmm_position(
             slippage_pct=float(request.slippage_pct) if request.slippage_pct is not None else None,
         ))
 
-        transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
+        transaction_hash = get_transaction_hash_from_response(result)
         if not transaction_hash:
             raise HTTPException(status_code=500, detail="No transaction hash returned from Gateway")
 
@@ -1234,7 +1235,7 @@ async def collect_fees_from_clmm_position(
             position_address=request.position_address
         ))
 
-        transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
+        transaction_hash = get_transaction_hash_from_response(result)
         if not transaction_hash:
             raise HTTPException(status_code=500, detail="No transaction hash returned from Gateway")
 

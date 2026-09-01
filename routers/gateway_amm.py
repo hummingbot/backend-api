@@ -43,6 +43,7 @@ from models import (
 )
 from routers.gateway_extras import (
     ExtraParamsSpec,
+    get_transaction_hash_from_response,
     get_transaction_status_from_response,
     transaction_id_from_error,
     validate_extra_params,
@@ -177,13 +178,17 @@ async def _record_event(
     write to the caller.
     """
     tx_status = get_transaction_status_from_response(result)
+    # "" rather than None: the column is not nullable, and a write whose id Gateway
+    # withheld is still worth recording — unlike the routes above, this one never
+    # fails the operation over a missing hash.
+    transaction_hash = get_transaction_hash_from_response(result) or ""
     data = result.get("data") or {}
     chain, _ = network.split("-", 1) if "-" in network else (network, "")
 
     try:
         async with db_manager.get_session_context() as session:
             await GatewayAMMRepository(session).create_event({
-                "transaction_hash": result.get("signature") or result.get("txHash") or "",
+                "transaction_hash": transaction_hash,
                 "connector": connector,
                 "network": network,
                 "wallet_address": wallet_address,
@@ -197,7 +202,7 @@ async def _record_event(
                 "gas_token": get_native_gas_token(chain) if data.get("fee") is not None else None,
                 "status": tx_status,
             })
-        logger.info(f"Recorded AMM {event_type}: {result.get('signature')} (status: {tx_status})")
+        logger.info(f"Recorded AMM {event_type}: {transaction_hash} (status: {tx_status})")
     except Exception as db_error:
         logger.error(f"Error recording AMM {event_type} event: {db_error}", exc_info=True)
 

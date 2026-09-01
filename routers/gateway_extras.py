@@ -33,6 +33,26 @@ def get_transaction_status_from_response(gateway_response: dict) -> str:
     return "SUBMITTED"
 
 
+def get_transaction_hash_from_response(gateway_response: dict) -> Optional[str]:
+    """The transaction id a Gateway write response reports, whatever chain it came from.
+
+    Gateway names the same field three ways — Solana routes answer `signature`, EVM
+    routes `txHash`, and a few older shapes `hash` — so reading only one of them is
+    reading only one family of chains. The CLMM open handler did exactly that
+    (`signature` alone) and answered every uniswap/pancakeswap open with a 500 saying
+    no signature was returned, for a position that had in fact just been opened.
+
+    Returns None when the response carries no id at all; callers decide whether that is
+    a 500 (the routes that must answer with a hash) or an empty column (the AMM event
+    recorder, which records what it has and never fails the write over it).
+    """
+    return (
+        gateway_response.get("signature")
+        or gateway_response.get("txHash")
+        or gateway_response.get("hash")
+    )
+
+
 # A Solana signature or an EVM transaction hash, as they appear inside Gateway's
 # landed-but-failed message: "Transaction <id> landed on-chain but failed: <reason>".
 _TRANSACTION_ID = re.compile(r"[Tt]ransaction ([1-9A-HJ-NP-Za-km-z]{43,88}|0x[0-9a-fA-F]{64})")

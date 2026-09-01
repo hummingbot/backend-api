@@ -15,7 +15,12 @@ from database import AsyncDatabaseManager
 from database.repositories import GatewaySwapRepository
 from deps import get_accounts_service, get_database_manager, require_gateway_online
 from models import SwapExecuteQuoteRequest, SwapExecuteRequest, SwapExecuteResponse, SwapQuoteRequest, SwapQuoteResponse
-from routers.gateway_extras import ExtraParamsSpec, get_transaction_status_from_response, validate_extra_params
+from routers.gateway_extras import (
+    ExtraParamsSpec,
+    get_transaction_hash_from_response,
+    get_transaction_status_from_response,
+    validate_extra_params,
+)
 from services.accounts_service import AccountsService
 from services.gateway_client import GatewayError, check_gateway_error, get_native_gas_token
 from utils.trading_pair import split_trading_pair
@@ -135,7 +140,7 @@ async def _record_and_report_swap(
     already saw — and not at all in what has to be recorded afterwards. One copy is what
     stops the two-step flow from growing its own subtly different accounting.
     """
-    transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
+    transaction_hash = get_transaction_hash_from_response(result)
     if not transaction_hash:
         raise HTTPException(status_code=500, detail="No transaction hash returned from Gateway")
 
