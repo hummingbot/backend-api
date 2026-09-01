@@ -472,6 +472,20 @@ class BotsOrchestrator:
             await bot_run_repo.update_bot_run_stopped(bot_name, final_status=final_status)
             logger.info(f"Updated bot run status to STOPPED for {bot_name}")
 
+    async def mark_bot_run_errored(self, bot_name: str, error_message: str):
+        """Close out a bot run with an error state and message.
+
+        Best-effort: a failure to record the error must never mask the original
+        one, so database problems are logged and swallowed.
+        """
+        try:
+            async with self.db_manager.get_session_context() as session:
+                bot_run_repo = BotRunRepository(session)
+                await bot_run_repo.update_bot_run_stopped(bot_name, error_message=error_message)
+                logger.info(f"Updated bot run with error status for {bot_name}: {error_message}")
+        except Exception as e:
+            logger.error(f"Failed to update bot run with error: {e}")
+
     async def get_bot_runs(
         self,
         bot_name: Optional[str] = None,
@@ -644,6 +658,7 @@ class BotsOrchestrator:
             if not stop_response or not stop_response.get("success", False):
                 error_msg = stop_response.get('error', 'Unknown error') if stop_response else 'No response from bot orchestrator'
                 logger.error(f"Failed to stop bot process: {error_msg}")
+                await self.mark_bot_run_errored(bot_name, f"Failed to stop bot process: {error_msg}")
                 return
 
             # Step 4: Wait for graceful shutdown (15 seconds as requested)
@@ -670,6 +685,9 @@ class BotsOrchestrator:
 
             if not container_stopped:
                 logger.error(f"Failed to stop container {bot_name} after {max_retries} attempts")
+                await self.mark_bot_run_errored(
+                    bot_name, f"Failed to stop container after {max_retries} attempts"
+                )
                 return
 
             # Step 6: Archive the bot data
@@ -709,32 +727,12 @@ class BotsOrchestrator:
             else:
                 logging.error(f"Failed to remove container {bot_name}")
 
-                # Update bot run with error status (but keep stopped_at timestamp from earlier)
-                try:
-                    async with self.db_manager.get_session_context() as session:
-                        bot_run_repo = BotRunRepository(session)
-                        await bot_run_repo.update_bot_run_stopped(
-                            bot_name,
-                            error_message="Failed to remove container during archive process"
-                        )
-                        logger.info(f"Updated bot run with error status for {bot_name}")
-                except Exception as e:
-                    logger.error(f"Failed to update bot run with error: {e}")
+                # Keep the stopped_at timestamp from earlier, but flag why it never archived
+                await self.mark_bot_run_errored(bot_name, "Failed to remove container during archive process")
 
         except Exception as e:
             logging.error(f"Error in background stop-and-archive for {bot_name}: {str(e)}")
-
-            # Update bot run with error status
-            try:
-                async with self.db_manager.get_session_context() as session:
-                    bot_run_repo = BotRunRepository(session)
-                    await bot_run_repo.update_bot_run_stopped(
-                        bot_name,
-                        error_message=str(e)
-                    )
-                    logger.info(f"Updated bot run with error status for {bot_name}")
-            except Exception as db_error:
-                logger.error(f"Failed to update bot run with error: {db_error}")
+            await self.mark_bot_run_errored(bot_name, str(e))
         finally:
             # Always clear the stopping status when the background task completes
             self.clear_bot_stopping(bot_name)
