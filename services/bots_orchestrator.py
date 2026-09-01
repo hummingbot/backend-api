@@ -601,8 +601,6 @@ class BotsOrchestrator:
     async def stop_and_archive_bot(
         self,
         bot_name: str,
-        container_name: str,
-        bot_name_for_orchestrator: str,
         skip_order_cancellation: bool,
         archive_locally: bool,
         s3_bucket: Optional[str],
@@ -618,13 +616,13 @@ class BotsOrchestrator:
             logger.info(f"Starting background stop-and-archive for {bot_name}")
 
             # Step 1: Capture bot final status before stopping (while bot is still running)
-            logger.info(f"Capturing final status for {bot_name_for_orchestrator}")
+            logger.info(f"Capturing final status for {bot_name}")
             final_status = None
             try:
-                final_status = self.get_bot_status(bot_name_for_orchestrator)
-                logger.info(f"Captured final status for {bot_name_for_orchestrator}: {final_status}")
+                final_status = self.get_bot_status(bot_name)
+                logger.info(f"Captured final status for {bot_name}: {final_status}")
             except Exception as e:
-                logger.warning(f"Failed to capture final status for {bot_name_for_orchestrator}: {e}")
+                logger.warning(f"Failed to capture final status for {bot_name}: {e}")
 
             # Step 2: Update bot run with stopped_at timestamp and final status before stopping
             try:
@@ -635,10 +633,10 @@ class BotsOrchestrator:
                 # Continue with stop process even if database update fails
 
             # Step 3: Mark the bot as stopping, and stop the bot trading process
-            self.set_bot_stopping(bot_name_for_orchestrator)
-            logger.info(f"Stopping bot trading process for {bot_name_for_orchestrator}")
+            self.set_bot_stopping(bot_name)
+            logger.info(f"Stopping bot trading process for {bot_name}")
             stop_response = await self.stop_bot(
-                bot_name_for_orchestrator,
+                bot_name,
                 skip_order_cancellation=skip_order_cancellation,
                 async_backend=True  # Always use async for background tasks
             )
@@ -658,44 +656,44 @@ class BotsOrchestrator:
             container_stopped = False
 
             for i in range(max_retries):
-                logger.info(f"Attempting to stop container {container_name} (attempt {i+1}/{max_retries})")
-                docker_manager.stop_container(container_name)
+                logger.info(f"Attempting to stop container {bot_name} (attempt {i+1}/{max_retries})")
+                docker_manager.stop_container(bot_name)
 
                 # Check if container is already stopped
-                container_status = docker_manager.get_container_status(container_name)
+                container_status = docker_manager.get_container_status(bot_name)
                 if container_status.get("state", {}).get("status") == "exited":
                     container_stopped = True
-                    logger.info(f"Container {container_name} is already stopped")
+                    logger.info(f"Container {bot_name} is already stopped")
                     break
 
                 await asyncio.sleep(retry_interval)
 
             if not container_stopped:
-                logger.error(f"Failed to stop container {container_name} after {max_retries} attempts")
+                logger.error(f"Failed to stop container {bot_name} after {max_retries} attempts")
                 return
 
             # Step 6: Archive the bot data
-            instance_dir = os.path.join('bots', 'instances', container_name)
+            instance_dir = os.path.join('bots', 'instances', bot_name)
             logger.info(f"Archiving bot data from {instance_dir}")
 
             try:
                 if archive_locally:
-                    bot_archiver.archive_locally(container_name, instance_dir)
+                    bot_archiver.archive_locally(bot_name, instance_dir)
                 else:
-                    bot_archiver.archive_and_upload(container_name, instance_dir, bucket_name=s3_bucket)
-                logger.info(f"Successfully archived bot data for {container_name}")
+                    bot_archiver.archive_and_upload(bot_name, instance_dir, bucket_name=s3_bucket)
+                logger.info(f"Successfully archived bot data for {bot_name}")
             except Exception as e:
                 logger.error(f"Archive failed: {str(e)}")
                 # Continue with removal even if archive fails
 
             # Step 7: Remove the container
-            logging.info(f"Removing container {container_name}")
-            remove_response = docker_manager.remove_container(container_name, force=False)
+            logging.info(f"Removing container {bot_name}")
+            remove_response = docker_manager.remove_container(bot_name, force=False)
 
             if not remove_response.get("success"):
                 # If graceful remove fails, try force remove
                 logging.warning("Graceful container removal failed, attempting force removal")
-                remove_response = docker_manager.remove_container(container_name, force=True)
+                remove_response = docker_manager.remove_container(bot_name, force=True)
 
             if remove_response.get("success"):
                 logging.info(f"Successfully completed stop-and-archive for bot {bot_name}")
@@ -709,7 +707,7 @@ class BotsOrchestrator:
                 except Exception as e:
                     logger.error(f"Failed to update bot run to archived: {e}")
             else:
-                logging.error(f"Failed to remove container {container_name}")
+                logging.error(f"Failed to remove container {bot_name}")
 
                 # Update bot run with error status (but keep stopped_at timestamp from earlier)
                 try:
@@ -739,11 +737,11 @@ class BotsOrchestrator:
                 logger.error(f"Failed to update bot run with error: {db_error}")
         finally:
             # Always clear the stopping status when the background task completes
-            self.clear_bot_stopping(bot_name_for_orchestrator)
+            self.clear_bot_stopping(bot_name)
             logger.info(f"Cleared stopping status for bot {bot_name}")
 
             # Remove bot from active_bots and clear all MQTT data
-            if bot_name_for_orchestrator in self.active_bots:
-                self.mqtt_manager.clear_bot_data(bot_name_for_orchestrator)
-                del self.active_bots[bot_name_for_orchestrator]
-                logger.info(f"Removed bot {bot_name_for_orchestrator} from active_bots and cleared MQTT data")
+            if bot_name in self.active_bots:
+                self.mqtt_manager.clear_bot_data(bot_name)
+                del self.active_bots[bot_name]
+                logger.info(f"Removed bot {bot_name} from active_bots and cleared MQTT data")
