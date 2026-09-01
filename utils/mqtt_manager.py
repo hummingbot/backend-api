@@ -2,7 +2,7 @@ import asyncio
 import json
 import logging
 import time
-from collections import defaultdict, deque
+from collections import OrderedDict, defaultdict, deque
 from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, Optional, Set
 
@@ -33,10 +33,12 @@ class MQTTManager:
 
         # Auto-discovered bots
         self._discovered_bots: Dict[str, float] = {}  # bot_id: last_seen_timestamp
-        
-        # Message deduplication tracking
-        self._processed_messages: Dict[str, float] = {}  # message_hash: timestamp
+
+        # Message deduplication tracking. Entries are inserted in non-decreasing
+        # timestamp order, so expiry only ever has to touch the oldest end.
+        self._processed_messages: "OrderedDict[str, float]" = OrderedDict()  # message_hash: timestamp
         self._message_ttl = 300  # 5 minutes TTL for processed messages
+        self._max_processed_messages = 10000  # hard cap, so a log burst cannot grow the cache without bound
 
         # Connection state
         self._connected = False
@@ -92,7 +94,7 @@ class MQTTManager:
             for topic, qos in self._subscriptions:
                 await client.subscribe(topic, qos=qos)
             yield client
-            
+
         # Cleanup on exit
         self._connected = False
 
@@ -207,14 +209,14 @@ class MQTTManager:
             level = data.get("level_name") or data.get("levelname") or data.get("level", "INFO")
             message = data.get("msg") or data.get("message", "")
             timestamp = data.get("timestamp") or data.get("time") or time.time()
-            
+
             # Create hash for deduplication (bot_id + message + timestamp within 1 second)
             message_hash = f"{bot_id}:{message}:{int(timestamp)}"
         elif isinstance(data, str):
             message = data
             timestamp = time.time()
             level = "INFO"
-            
+
             # Create hash for string messages
             message_hash = f"{bot_id}:{message}:{int(timestamp)}"
         else:
@@ -227,13 +229,20 @@ class MQTTManager:
             logger.debug(f"Skipping duplicate log message from {bot_id}: {message[:50]}...")
             return
 
-        # Clean up old message hashes (older than TTL)
-        expired_hashes = [h for h, t in self._processed_messages.items() if current_time - t > self._message_ttl]
-        for h in expired_hashes:
-            del self._processed_messages[h]
+        # Clean up old message hashes (older than TTL). The cache is ordered by
+        # insertion time, so we only pop from the oldest end and stop at the
+        # first entry that is still live: O(expired) instead of O(cache size).
+        while self._processed_messages:
+            oldest_time = next(iter(self._processed_messages.values()))
+            if current_time - oldest_time <= self._message_ttl:
+                break
+            self._processed_messages.popitem(last=False)
 
-        # Record this message as processed
+        # Record this message as processed, evicting the oldest entries if the
+        # dedup cache has outgrown its cap
         self._processed_messages[message_hash] = current_time
+        while len(self._processed_messages) > self._max_processed_messages:
+            self._processed_messages.popitem(last=False)
 
         # Process the message
         if isinstance(data, dict):
@@ -272,7 +281,7 @@ class MQTTManager:
 
     async def _handle_external_event(self, bot_id: str, channel: str, data: Any):
         """Handle external events."""
-        event_type = channel.split("/")[-1]
+        # Process external events as needed
 
     async def _handle_rpc_response(self, topic: str, message):
         """Handle RPC responses on hummingbot-api/response/* topics."""
@@ -296,10 +305,8 @@ class MQTTManager:
 
     async def _handle_command_response(self, bot_id: str, channel: str, data: Any):
         """Handle command responses (legacy - keeping for backward compatibility)."""
-        # Extract command from response channel (e.g., response/start/1234567890 or response/history)
-        channel_parts = channel.split("/")
-        if len(channel_parts) >= 2:
-            command = channel_parts[1]
+        # The command lives in the response channel (e.g. response/start/1234567890
+        # or response/history); nothing consumes it yet.
 
     async def start(self):
         """Start the MQTT client."""
