@@ -1,3 +1,5 @@
+import math
+
 from fastapi import Depends, HTTPException, Request
 
 from database import AsyncDatabaseManager
@@ -7,6 +9,7 @@ from services.bots_orchestrator import BotsOrchestrator
 from services.docker_service import DockerService
 from services.executor_service import ExecutorService
 from services.executor_ws_manager import ExecutorWebSocketManager
+from services.gateway_client import GatewayClient
 from services.gateway_clmm_service import GatewayCLMMService
 from services.gateway_service import GatewayService
 from services.gateway_swap_service import GatewaySwapService
@@ -29,6 +32,9 @@ def get_accounts_service(request: Request) -> AccountsService:
 
 
 GATEWAY_UNAVAILABLE_DETAIL = "Gateway service is not available"
+# The guard's verdict is cached for the client's ping TTL, so a retry sooner than that can only
+# read back the same answer. Advertise the TTL as the standard back-off signal.
+GATEWAY_UNAVAILABLE_RETRY_AFTER = str(math.ceil(GatewayClient.PING_CACHE_TTL_SECONDS))
 
 
 async def require_gateway_online(accounts_service: AccountsService = Depends(get_accounts_service)) -> None:
@@ -37,9 +43,16 @@ async def require_gateway_online(accounts_service: AccountsService = Depends(get
     Attach per route with ``dependencies=[Depends(require_gateway_online)]``. Deliberately not applied at
     router level: the container-control routes (``/gateway/start``, ``/gateway/restart``, ...) must answer
     precisely when Gateway is down, and the DB-backed reads keep serving stored data regardless.
+
+    ``ping`` answers from a short-lived cache, so a burst of guarded requests costs one round-trip
+    rather than one each; an unreachable Gateway clears that cache and is reported straight away.
     """
     if not await accounts_service.gateway_client.ping():
-        raise HTTPException(status_code=503, detail=GATEWAY_UNAVAILABLE_DETAIL)
+        raise HTTPException(
+            status_code=503,
+            detail=GATEWAY_UNAVAILABLE_DETAIL,
+            headers={"Retry-After": GATEWAY_UNAVAILABLE_RETRY_AFTER},
+        )
 
 
 def get_docker_service(request: Request) -> DockerService:
