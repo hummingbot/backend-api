@@ -67,7 +67,9 @@ from services.bots_orchestrator import BotsOrchestrator  # noqa: E402
 from services.docker_service import DockerService  # noqa: E402
 from services.executor_service import ExecutorService  # noqa: E402
 from services.executor_ws_manager import ExecutorWebSocketManager  # noqa: E402
+from services.gateway_clmm_service import GatewayCLMMService  # noqa: E402
 from services.gateway_service import GatewayService  # noqa: E402
+from services.gateway_swap_service import GatewaySwapService  # noqa: E402
 from services.market_data_service import MarketDataService  # noqa: E402
 from services.trading_history_service import TradingHistoryService  # noqa: E402
 from services.trading_service import TradingService  # noqa: E402
@@ -237,6 +239,12 @@ async def lifespan(app: FastAPI):
     trading_history_service = TradingHistoryService(db_manager=db_manager)
     logging.info("TradingHistoryService initialized")
 
+    # Gateway CLMM/swap persistence - the /gateway/clmm/* and /gateway/swap* routes
+    # read and write their history through these instead of owning sessions themselves
+    gateway_clmm_service = GatewayCLMMService(db_manager=db_manager)
+    gateway_swap_service = GatewaySwapService(db_manager=db_manager)
+    logging.info("GatewayCLMMService and GatewaySwapService initialized")
+
     # =========================================================================
     # 4. ExecutorService - depends on TradingService (NO circular dependency)
     # =========================================================================
@@ -331,6 +339,8 @@ async def lifespan(app: FastAPI):
     app.state.trading_service = trading_service
     app.state.accounts_service = accounts_service
     app.state.trading_history_service = trading_history_service
+    app.state.gateway_clmm_service = gateway_clmm_service
+    app.state.gateway_swap_service = gateway_swap_service
     app.state.executor_service = executor_service
     websocket_manager = WebSocketManager(market_data_service)
     app.state.websocket_manager = websocket_manager

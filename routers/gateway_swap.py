@@ -11,9 +11,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 
-from database import AsyncDatabaseManager
-from database.repositories import GatewaySwapRepository
-from deps import get_accounts_service, get_database_manager, require_gateway_online
+from deps import get_accounts_service, get_gateway_swap_service, require_gateway_online
 from models import SwapExecuteQuoteRequest, SwapExecuteRequest, SwapExecuteResponse, SwapQuoteRequest, SwapQuoteResponse
 from routers.gateway_extras import (
     ExtraParamsSpec,
@@ -23,6 +21,7 @@ from routers.gateway_extras import (
 )
 from services.accounts_service import AccountsService
 from services.gateway_client import GatewayError, check_gateway_error, get_native_gas_token
+from services.gateway_swap_service import GatewaySwapService
 from utils.trading_pair import split_trading_pair
 
 logger = logging.getLogger(__name__)
@@ -121,7 +120,7 @@ async def get_swap_quote(
 async def _record_and_report_swap(
     *,
     result: dict,
-    db_manager: AsyncDatabaseManager,
+    swap_service: GatewaySwapService,
     accounts_service: AccountsService,
     connector: str,
     network: str,
@@ -194,39 +193,26 @@ async def _record_and_report_swap(
     # Get transaction status from Gateway response
     tx_status = get_transaction_status_from_response(result)
 
-    # Store swap in database
-    try:
-        async with db_manager.get_session_context() as session:
-            swap_repo = GatewaySwapRepository(session)
-
-            swap_data = {
-                "transaction_hash": transaction_hash,
-                "network": network,
-                # Store the base venue name: a swap on "jupiter" and one on
-                # "jupiter/router" are the same venue and must file together.
-                "connector": connector.split("/")[0],
-                "wallet_address": wallet_address,
-                "trading_pair": trading_pair,
-                "base_token": base,
-                "quote_token": quote,
-                "side": side,
-                "input_amount": float(input_amount),
-                "output_amount": float(output_amount),
-                "price": float(price),
-                "slippage_pct": float(slippage_pct) if slippage_pct is not None else None,
-                "gas_fee": float(gas_fee) if gas_fee is not None else None,
-                "gas_token": gas_token,
-                "status": tx_status,
-                # Set by the pool-scoped routes, which resolve exactly one pool; a
-                # router picks its own path across pools and leaves it unset.
-                "pool_address": data.get("poolAddress")
-            }
-
-            await swap_repo.create_swap(swap_data)
-            logger.info(f"Recorded swap in database: {transaction_hash} (status: {tx_status})")
-    except Exception as db_error:
-        # Log but don't fail the swap - it was submitted successfully
-        logger.error(f"Error recording swap in database: {db_error}", exc_info=True)
+    # Store swap in database. Best-effort by policy — the swap was submitted
+    # successfully, so a bookkeeping failure must not be reported as a failed swap.
+    await swap_service.record_swap(
+        transaction_hash=transaction_hash,
+        network=network,
+        connector=connector,
+        wallet_address=wallet_address,
+        trading_pair=trading_pair,
+        base_token=base,
+        quote_token=quote,
+        side=side,
+        input_amount=input_amount,
+        output_amount=output_amount,
+        price=price,
+        slippage_pct=slippage_pct,
+        gas_fee=gas_fee,
+        gas_token=gas_token,
+        status=tx_status,
+        pool_address=data.get("poolAddress"),
+    )
 
     return SwapExecuteResponse(
         transaction_hash=transaction_hash,
@@ -248,7 +234,7 @@ async def _record_and_report_swap(
 async def execute_swap(
     request: SwapExecuteRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    swap_service: GatewaySwapService = Depends(get_gateway_swap_service)
 ):
     """
     Execute a swap transaction via router (Jupiter, 0x).
@@ -296,7 +282,7 @@ async def execute_swap(
         ))
         return await _record_and_report_swap(
             result=result,
-            db_manager=db_manager,
+            swap_service=swap_service,
             accounts_service=accounts_service,
             connector=request.connector,
             network=request.network,
@@ -323,7 +309,7 @@ async def execute_swap(
 @router.get("/swaps/{transaction_hash}/status")
 async def get_swap_status(
     transaction_hash: str,
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    swap_service: GatewaySwapService = Depends(get_gateway_swap_service)
 ):
     """
     Get status of a specific swap by transaction hash.
@@ -335,14 +321,12 @@ async def get_swap_status(
         Swap details including current status
     """
     try:
-        async with db_manager.get_session_context() as session:
-            swap_repo = GatewaySwapRepository(session)
-            swap = await swap_repo.get_swap_by_tx_hash(transaction_hash)
-
-            if not swap:
-                raise HTTPException(status_code=404, detail=f"Swap not found: {transaction_hash}")
-
-            return swap_repo.to_dict(swap)
+        # None means "no such row" and nothing else: the service lets a database
+        # failure raise, so an unreachable database can never read as a 404.
+        swap = await swap_service.get_swap(transaction_hash)
+        if swap is None:
+            raise HTTPException(status_code=404, detail=f"Swap not found: {transaction_hash}")
+        return swap
 
     except HTTPException:
         raise
@@ -355,7 +339,7 @@ async def get_swap_status(
 async def execute_swap_quote(
     request: SwapExecuteQuoteRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    swap_service: GatewaySwapService = Depends(get_gateway_swap_service)
 ):
     """
     Execute a quote returned by /swap/quote, by its quote_id.
@@ -398,7 +382,7 @@ async def execute_swap_quote(
 
         return await _record_and_report_swap(
             result=result,
-            db_manager=db_manager,
+            swap_service=swap_service,
             accounts_service=accounts_service,
             connector=request.connector,
             network=request.network,
@@ -433,7 +417,7 @@ async def search_swaps(
     end_time: Optional[int] = None,
     limit: int = 50,
     offset: int = 0,
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    swap_service: GatewaySwapService = Depends(get_gateway_swap_service)
 ):
     """
     Search swap history with filters.
@@ -453,36 +437,17 @@ async def search_swaps(
         Paginated list of swaps
     """
     try:
-        # Validate limit
-        if limit > 1000:
-            limit = 1000
-
-        async with db_manager.get_session_context() as session:
-            swap_repo = GatewaySwapRepository(session)
-            swaps = await swap_repo.get_swaps(
-                network=network,
-                connector=connector,
-                wallet_address=wallet_address,
-                trading_pair=trading_pair,
-                status=status,
-                start_time=start_time,
-                end_time=end_time,
-                limit=limit,
-                offset=offset
-            )
-
-            # Get total count for pagination (simplified - actual count would need separate query)
-            has_more = len(swaps) == limit
-
-            return {
-                "data": [swap_repo.to_dict(swap) for swap in swaps],
-                "pagination": {
-                    "limit": limit,
-                    "offset": offset,
-                    "has_more": has_more,
-                    "total_count": len(swaps) + offset if not has_more else None
-                }
-            }
+        return await swap_service.search_swaps(
+            network=network,
+            connector=connector,
+            wallet_address=wallet_address,
+            trading_pair=trading_pair,
+            status=status,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+            offset=offset
+        )
 
     except Exception as e:
         logger.error(f"Error searching swaps: {e}", exc_info=True)
@@ -495,7 +460,7 @@ async def get_swaps_summary(
     wallet_address: Optional[str] = None,
     start_time: Optional[int] = None,
     end_time: Optional[int] = None,
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    swap_service: GatewaySwapService = Depends(get_gateway_swap_service)
 ):
     """
     Get swap summary statistics.
@@ -510,15 +475,12 @@ async def get_swaps_summary(
         Summary statistics including volume, fees, success rate
     """
     try:
-        async with db_manager.get_session_context() as session:
-            swap_repo = GatewaySwapRepository(session)
-            summary = await swap_repo.get_swaps_summary(
-                network=network,
-                wallet_address=wallet_address,
-                start_time=start_time,
-                end_time=end_time
-            )
-            return summary
+        return await swap_service.get_swaps_summary(
+            network=network,
+            wallet_address=wallet_address,
+            start_time=start_time,
+            end_time=end_time
+        )
 
     except Exception as e:
         logger.error(f"Error getting swaps summary: {e}", exc_info=True)

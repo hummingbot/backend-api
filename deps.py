@@ -7,7 +7,9 @@ from services.bots_orchestrator import BotsOrchestrator
 from services.docker_service import DockerService
 from services.executor_service import ExecutorService
 from services.executor_ws_manager import ExecutorWebSocketManager
+from services.gateway_clmm_service import GatewayCLMMService
 from services.gateway_service import GatewayService
+from services.gateway_swap_service import GatewaySwapService
 from services.market_data_service import MarketDataService
 from services.trading_history_service import TradingHistoryService
 from services.trading_service import TradingService
@@ -48,6 +50,16 @@ def get_docker_service(request: Request) -> DockerService:
 def get_gateway_service(request: Request) -> GatewayService:
     """Get GatewayService from app state."""
     return request.app.state.gateway_service
+
+
+def get_gateway_clmm_service(request: Request) -> GatewayCLMMService:
+    """Get GatewayCLMMService from app state."""
+    return request.app.state.gateway_clmm_service
+
+
+def get_gateway_swap_service(request: Request) -> GatewaySwapService:
+    """Get GatewaySwapService from app state."""
+    return request.app.state.gateway_swap_service
 
 
 def get_connector_service(request: Request) -> UnifiedConnectorService:

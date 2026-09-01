@@ -194,6 +194,15 @@ class _FakeDbManager:
         return _Ctx()
 
 
+def _fake_clmm_service():
+    """The real service the routes write through, backed by _FakeRepo."""
+    from services.gateway_clmm_service import GatewayCLMMService
+
+    service = GatewayCLMMService(db_manager=_FakeDbManager())
+    service.repository_class = _FakeRepo
+    return service
+
+
 # A base-mainnet (EVM) write: no `signature`, gas paid in ETH. Under the old code this
 # recorded gas_token NULL for add/remove and "ETH" for collect-fees — same chain, same
 # wallet, same block.
@@ -228,11 +237,10 @@ CLMM_WRITES = [
 ]
 
 
-def _record_clmm_write(monkeypatch, route, body, gateway_method, gateway_response):
-    from deps import get_accounts_service, get_database_manager
+def _record_clmm_write(route, body, gateway_method, gateway_response):
+    from deps import get_accounts_service, get_gateway_clmm_service
     from routers import gateway_clmm
 
-    monkeypatch.setattr(gateway_clmm, "GatewayCLMMRepository", _FakeRepo)
     _FakeRepo.events = []
 
     gateway_client = SimpleNamespace(
@@ -247,7 +255,7 @@ def _record_clmm_write(monkeypatch, route, body, gateway_method, gateway_respons
     app = FastAPI()
     app.include_router(gateway_clmm.router)
     app.dependency_overrides[get_accounts_service] = lambda: SimpleNamespace(gateway_client=gateway_client)
-    app.dependency_overrides[get_database_manager] = lambda: _FakeDbManager()
+    app.dependency_overrides[get_gateway_clmm_service] = lambda: _fake_clmm_service()
 
     response = TestClient(app, raise_server_exceptions=False).post(route, json=body)
     assert response.status_code == 200, response.text
@@ -256,9 +264,9 @@ def _record_clmm_write(monkeypatch, route, body, gateway_method, gateway_respons
 
 @pytest.mark.parametrize("route, body, gateway_method, gateway_response, event_type", CLMM_WRITES)
 def test_every_clmm_event_records_the_chains_gas_token(
-    monkeypatch, route, body, gateway_method, gateway_response, event_type
+    route, body, gateway_method, gateway_response, event_type
 ):
-    events = _record_clmm_write(monkeypatch, route, body, gateway_method, gateway_response)
+    events = _record_clmm_write(route, body, gateway_method, gateway_response)
 
     recorded = [e for e in events if e["event_type"] == event_type]
     assert recorded, f"{event_type} wrote no event"
@@ -272,24 +280,23 @@ def test_every_clmm_event_records_the_chains_gas_token(
         assert event["transaction_hash"] == "0xdeadbeef"
 
 
-def test_add_remove_and_collect_fees_agree_on_the_gas_token(monkeypatch):
+def test_add_remove_and_collect_fees_agree_on_the_gas_token():
     """The parity the ternary broke: three writers, one chain, one answer."""
     tokens = {}
     for route, body, gateway_method, gateway_response, event_type in CLMM_WRITES:
-        events = _record_clmm_write(monkeypatch, route, body, gateway_method, gateway_response)
+        events = _record_clmm_write(route, body, gateway_method, gateway_response)
         tokens[event_type] = next(e["gas_token"] for e in events if e["event_type"] == event_type)
 
     assert set(tokens.values()) == {get_native_gas_token("base")}, tokens
     assert None not in tokens.values()
 
 
-def test_an_evm_open_is_not_rejected_for_having_no_solana_signature(monkeypatch):
+def test_an_evm_open_is_not_rejected_for_having_no_solana_signature():
     """The open handler read `signature` alone, so a uniswap open that Gateway confirmed
     came back as a 500 saying no signature was returned — for a position that existed."""
-    from deps import get_accounts_service, get_database_manager
+    from deps import get_accounts_service, get_gateway_clmm_service
     from routers import gateway_clmm
 
-    monkeypatch.setattr(gateway_clmm, "GatewayCLMMRepository", _FakeRepo)
     _FakeRepo.events = []
 
     gateway_client = SimpleNamespace(
@@ -307,7 +314,7 @@ def test_an_evm_open_is_not_rejected_for_having_no_solana_signature(monkeypatch)
     app = FastAPI()
     app.include_router(gateway_clmm.router)
     app.dependency_overrides[get_accounts_service] = lambda: SimpleNamespace(gateway_client=gateway_client)
-    app.dependency_overrides[get_database_manager] = lambda: _FakeDbManager()
+    app.dependency_overrides[get_gateway_clmm_service] = lambda: _fake_clmm_service()
 
     response = TestClient(app, raise_server_exceptions=False).post("/gateway/clmm/open", json={
         "connector": "uniswap",
