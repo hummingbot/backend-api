@@ -965,9 +965,12 @@ class UnifiedConnectorService:
 
             async with self.db_manager.get_session_context() as session:
                 order_repo = OrderRepository(session)
+                # The connector needs the complete in-flight book: any cap here would
+                # leave live exchange orders invisible to sync and reconciliation.
                 active_orders = await order_repo.get_active_orders(
                     account_name=account_name,
-                    connector_name=connector_name
+                    connector_name=connector_name,
+                    limit=None
                 )
 
                 for order_record in active_orders:

@@ -1,3 +1,4 @@
+import logging
 from datetime import datetime
 from decimal import Decimal
 from typing import Dict, List, Optional
@@ -7,11 +8,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Order
 
+logger = logging.getLogger(__name__)
+
 
 class OrderRepository:
     # Client order ids are batched into `IN (...)` clauses of at most this size so a
     # connector with a very large book does not build an unbounded bind-parameter list.
     CLIENT_ID_CHUNK_SIZE = 500
+
+    # Default cap for `get_active_orders`. Callers that need the complete book
+    # (connector startup, for instance) must pass `limit=None`.
+    DEFAULT_ACTIVE_ORDERS_LIMIT = 1000
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -132,8 +139,14 @@ class OrderRepository:
 
     async def get_active_orders(self, account_name: Optional[str] = None,
                                 connector_name: Optional[str] = None,
-                                trading_pair: Optional[str] = None) -> List[Order]:
-        """Get active orders (SUBMITTED, OPEN, PARTIALLY_FILLED, PENDING_CANCEL)."""
+                                trading_pair: Optional[str] = None,
+                                limit: Optional[int] = DEFAULT_ACTIVE_ORDERS_LIMIT) -> List[Order]:
+        """Get active orders (SUBMITTED, OPEN, PARTIALLY_FILLED, PENDING_CANCEL).
+
+        `limit` caps how many rows come back, newest first; pass `limit=None` to get the
+        whole book with no cap. A query that reaches the cap logs a warning, so a
+        truncated result is never silent.
+        """
         query = select(Order).where(
             Order.status.in_(["SUBMITTED", "OPEN", "PARTIALLY_FILLED", "PENDING_CANCEL"])
         )
@@ -146,10 +159,21 @@ class OrderRepository:
         if trading_pair:
             query = query.where(Order.trading_pair == trading_pair)
 
-        query = query.order_by(Order.created_at.desc()).limit(1000)
+        query = query.order_by(Order.created_at.desc())
+        if limit is not None:
+            query = query.limit(limit)
 
         result = await self.session.execute(query)
-        return result.scalars().all()
+        orders = result.scalars().all()
+
+        if limit is not None and len(orders) >= limit:
+            logger.warning(
+                f"get_active_orders returned {len(orders)} orders, reaching its limit of {limit}; "
+                f"older active orders may have been truncated "
+                f"(account={account_name}, connector={connector_name}, trading_pair={trading_pair})"
+            )
+
+        return orders
 
     async def get_orders_summary(self, account_name: Optional[str] = None,
                                  start_time: Optional[int] = None,
