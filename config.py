@@ -227,13 +227,28 @@ class AppSettings(BaseSettings):
 
 
 class BacktestingSettings(BaseSettings):
-    """Backtest result retention.
+    """Backtest execution limits and result retention.
 
     A finished backtest is ~98% bulk arrays (processed_data, pnl_timeseries) and only a
     few KB of metrics, so full payloads are archived to disk and only metrics stay
     resident. Retention is therefore a count of results, not a memory budget.
+
+    A run executes in its own worker process and saturates a core for its whole duration,
+    so the two execution limits are about the box, not about memory: how many cores runs
+    may claim at once, and how long one is allowed to claim one before being abandoned.
     """
 
+    max_concurrent: int = Field(
+        default=1,
+        description=(
+            "How many backtests may run at once; further submissions queue. Runs are isolated "
+            "in separate processes, so this can be raised up to the cores you are willing to give them"
+        )
+    )
+    timeout_seconds: float = Field(
+        default=1800.0,
+        description="Wall-clock budget for one backtest; the worker is killed and the task fails past it"
+    )
     max_results: int = Field(
         default=100,
         description="How many finished backtests to retain before the oldest are reaped"
