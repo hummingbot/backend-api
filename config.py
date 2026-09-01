@@ -55,6 +55,22 @@ class MarketDataSettings(BaseSettings):
         default=60.0,
         description="Maximum allowed WebSocket subscription update interval in seconds"
     )
+    ws_executor_min_update_interval: float = Field(
+        default=0.5,
+        description="Minimum allowed /ws/executors subscription update interval in seconds. "
+                    "The floor is stricter than the market-data one because executor push loops "
+                    "hit the database (executors, performance reports, positions with per-position "
+                    "rate lookups) instead of reading in-memory candles and order books"
+    )
+    ws_executor_max_update_interval: float = Field(
+        default=60.0,
+        description="Maximum allowed /ws/executors subscription update interval in seconds"
+    )
+    ws_executor_default_update_interval: float = Field(
+        default=2.0,
+        description="Update interval applied to a /ws/executors subscription that does not "
+                    "request one, in seconds"
+    )
     ticker_update_interval: int = Field(
         default=30,
         description="How often to refresh tickers from connected exchanges in seconds"

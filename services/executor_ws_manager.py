@@ -14,17 +14,13 @@ from typing import Any, Dict, Optional
 
 from fastapi import WebSocket
 
+from config import settings
 from services.bots_orchestrator import BotsOrchestrator
 from services.executor_service import ExecutorService
 from services.market_data_service import MarketDataService
 from utils.trading_pair import InvalidTradingPair, split_trading_pair
 
 logger = logging.getLogger(__name__)
-
-# Update interval bounds (seconds)
-MIN_UPDATE_INTERVAL = 0.5
-MAX_UPDATE_INTERVAL = 60.0
-DEFAULT_UPDATE_INTERVAL = 2.0
 
 SUBSCRIPTION_TYPES = {
     "executors",
@@ -75,10 +71,14 @@ def _compute_hash(data: Any) -> str:
 
 
 def _clamp_interval(interval: Optional[float]) -> float:
-    """Clamp update interval to allowed range."""
+    """Clamp update interval to the configured executor WebSocket range."""
+    md = settings.market_data
     if interval is None:
-        return DEFAULT_UPDATE_INTERVAL
-    return max(MIN_UPDATE_INTERVAL, min(MAX_UPDATE_INTERVAL, interval))
+        return md.ws_executor_default_update_interval
+    return max(
+        md.ws_executor_min_update_interval,
+        min(md.ws_executor_max_update_interval, interval),
+    )
 
 
 class ExecutorWebSocketManager:
