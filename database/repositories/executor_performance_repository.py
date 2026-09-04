@@ -40,27 +40,41 @@ class ExecutorPerformanceRepository:
 
     @staticmethod
     def _sample_by_interval(history: List[Dict], interval_minutes: int, grain_minutes: float) -> List[Dict]:
-        """Thin a descending-timestamp series down to one row per interval.
+        """Thin a descending-timestamp series down to one row per interval PER EXECUTOR.
+
+        The cursor is kept per executor_id, not once for the whole result. A single global
+        cursor turns `interval` into a rate limit on the *merged* series: an unnarrowed
+        query interleaves every live executor's rows on the same grain, so the executor
+        that happens to own the newest row in each window survives and the rest are not
+        thinned but dropped entirely -- absent from a 200 response, indistinguishable from
+        executors that never reported. At the 60s write grain against the 5m default that
+        is roughly one executor kept per five snapshot rows, fleet-wide.
+
+        Grouping makes the interval mean what the parameter says: each executor's own
+        series is thinned to its own resolution, and no scope disappears. Input order is
+        preserved, so the result stays descending by timestamp across executors.
 
         A no-op when the requested interval is no coarser than what is stored: there is
         nothing to thin, and the caller gets the native grain.
+
+        Thinning restarts at a page boundary -- the per-executor cursors do not survive in
+        `next_cursor`, which is a timestamp -- so an executor's first row on page two can
+        sit closer than `interval` to its last row on page one. That over-samples a scope
+        by at most one row per page; it never drops one.
         """
         if not history or interval_minutes <= grain_minutes:
             return history
 
         sampled = []
-        last_sampled_time = None
+        last_sampled_time: Dict[Optional[str], datetime] = {}
 
         for item in history:
+            scope = item.get("executor_id")
             item_time = datetime.fromisoformat(item["timestamp"].replace('Z', '+00:00'))
-            if last_sampled_time is None:
+            previous = last_sampled_time.get(scope)
+            if previous is None or (previous - item_time).total_seconds() / 60 >= interval_minutes:
                 sampled.append(item)
-                last_sampled_time = item_time
-            else:
-                time_diff = (last_sampled_time - item_time).total_seconds() / 60
-                if time_diff >= interval_minutes:
-                    sampled.append(item)
-                    last_sampled_time = item_time
+                last_sampled_time[scope] = item_time
 
         return sampled
 
@@ -244,6 +258,8 @@ class ExecutorPerformanceRepository:
 
         # Over-fetch by the thinning ratio so a sampled page still fills up, plus one row
         # to tell has_more apart from a page that happens to land exactly on the limit.
+        # The ratio is the worst case: sampling is per executor, so a window covering many
+        # executors retains more of what was fetched, never less.
         sampling_multiplier = max(1, int(interval_minutes // self.grain_minutes))
         fetch_limit = (limit * sampling_multiplier + 1) if limit else (100 * sampling_multiplier + 1)
         query = query.limit(fetch_limit)

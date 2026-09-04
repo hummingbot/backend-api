@@ -28,6 +28,7 @@ import pytest
 pytest.importorskip("hummingbot")
 
 from database.models import ControllerPerformanceSnapshot, ExecutorPerformanceSnapshot  # noqa: E402
+from database.repositories.controller_performance_repository import ControllerPerformanceRepository  # noqa: E402
 from database.repositories.executor_performance_repository import ExecutorPerformanceRepository  # noqa: E402
 from models.performance import controller_row_to_performance_row, executor_row_to_performance_row  # noqa: E402
 from services.executor_service import ExecutorService  # noqa: E402
@@ -300,6 +301,75 @@ class TestTheSampler:
     def test_one_minute_is_a_known_interval(self):
         """The executor grain is finer than anything the controller map could express."""
         assert ExecutorPerformanceRepository._interval_to_minutes("1m") == 1
+
+    def _fleet(self, executor_ids, count, step_minutes=1):
+        """`count` rows per executor, interleaved and newest first -- the stored order."""
+        rows = [
+            {"executor_id": executor_id,
+             "timestamp": (NOW - timedelta(minutes=i * step_minutes)).isoformat()}
+            for i in range(count)
+            for executor_id in executor_ids
+        ]
+        return sorted(rows, key=lambda row: row["timestamp"], reverse=True)
+
+    def test_thinning_a_fleet_keeps_every_executor(self):
+        """A global cursor made `interval` a rate limit on the merged series: at 5m over a
+        60s grain, three executors reporting together came back as one."""
+        history = self._fleet(["exec-A", "exec-B", "exec-C"], count=10)
+
+        sampled = ExecutorPerformanceRepository._sample_by_interval(history, 5, grain_minutes=1.0)
+
+        assert {row["executor_id"] for row in sampled} == {"exec-A", "exec-B", "exec-C"}
+
+    def test_a_coarse_interval_still_keeps_every_executor(self):
+        """The wider the window, the more a global cursor swallowed. 1h over 60s kept one."""
+        history = self._fleet(["exec-A", "exec-B", "exec-C"], count=10)
+
+        sampled = ExecutorPerformanceRepository._sample_by_interval(history, 60, grain_minutes=1.0)
+
+        assert {row["executor_id"] for row in sampled} == {"exec-A", "exec-B", "exec-C"}
+        # One row each: ten minutes of history cannot fill a second hourly slot.
+        assert len(sampled) == 3
+
+    def test_each_executors_own_series_is_thinned_to_the_interval(self):
+        """Grouping must not disable the thinning -- every scope obeys the interval."""
+        history = self._fleet(["exec-A", "exec-B"], count=21)
+
+        sampled = ExecutorPerformanceRepository._sample_by_interval(history, 5, grain_minutes=1.0)
+
+        for executor_id in ("exec-A", "exec-B"):
+            times = [
+                datetime.fromisoformat(row["timestamp"])
+                for row in sampled if row["executor_id"] == executor_id
+            ]
+            assert len(times) == 5
+            gaps = [(a - b).total_seconds() / 60 for a, b in zip(times, times[1:])]
+            assert all(gap >= 5 for gap in gaps)
+
+    def test_thinning_a_fleet_stays_newest_first(self):
+        """Consumers page on the last row's timestamp, so the merge order still holds."""
+        history = self._fleet(["exec-A", "exec-B", "exec-C"], count=12)
+
+        sampled = ExecutorPerformanceRepository._sample_by_interval(history, 5, grain_minutes=1.0)
+
+        times = [row["timestamp"] for row in sampled]
+        assert times == sorted(times, reverse=True)
+
+    def test_the_controller_sampler_keeps_every_controller_too(self):
+        """The same defect, same shape, on the series the wire-compatible route serves."""
+        history = sorted(
+            [
+                {"bot_name": "bot-1", "controller_id": controller_id,
+                 "timestamp": (NOW - timedelta(minutes=i * 5)).isoformat()}
+                for i in range(12)
+                for controller_id in (f"ctrl-{n}" for n in range(12))
+            ],
+            key=lambda row: row["timestamp"], reverse=True,
+        )
+
+        sampled = ControllerPerformanceRepository._sample_by_interval(history, 60)
+
+        assert len({row["controller_id"] for row in sampled}) == 12
 
 
 # --------------------------------------------------------------------------------------

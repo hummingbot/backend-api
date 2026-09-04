@@ -36,8 +36,17 @@ class PerformanceRow(BaseModel):
                     "Always false for controllers, which have no terminal row."
     )
 
-    realized_pnl_quote: float = Field(description="Realized PnL in quote currency")
-    unrealized_pnl_quote: float = Field(description="Unrealized PnL in quote currency")
+    realized_pnl_quote: float = Field(
+        description="Realized PnL in quote currency. For an executor this is its net PnL "
+                    "once the position is really settled, and 0 while it is not. A "
+                    "POSITION_HOLD close is not settled: the position carries on in "
+                    "position_holds, so a held executor's PnL stays unrealized here even "
+                    "though is_terminal is true."
+    )
+    unrealized_pnl_quote: float = Field(
+        description="Unrealized PnL in quote currency. For an executor this is its net "
+                    "PnL while the position is open, and after a POSITION_HOLD close."
+    )
     global_pnl_quote: float = Field(description="Total PnL (realized + unrealized) in quote currency")
     global_pnl_pct: float = Field(description="Total PnL as a fraction of the capital deployed")
     volume_quote: float = Field(

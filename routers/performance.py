@@ -107,6 +107,18 @@ async def get_performance_history(
     is written on PERFORMANCE_EXECUTOR_SNAPSHOT_INTERVAL (60s by default). The echoed
     `interval` says what was asked for, the timestamps say what was served.
 
+    It is a claim about resolution only. Sampling is per scope -- per executor, per (bot,
+    controller) -- so a coarser interval thins every scope's own series and never drops a
+    scope from the answer. An unnarrowed query over a fleet returns the whole fleet at
+    every interval, at a lower resolution.
+
+    Realized vs unrealized, for executors: an executor reports one net PnL, and the split
+    comes from whether its position is really settled. A `POSITION_HOLD` close is NOT
+    settled -- it hands the position on to position_holds, which report it in their own
+    right -- so its PnL stays in `unrealized_pnl_quote` even though `is_terminal` is true
+    and `status` is TERMINATED. Counting it realized here would double-count it, the same
+    exclusion /executors/performance applies. Any other terminal close is realized.
+
     An executor's series is answered from executor_performance_snapshots alone, including
     its final value: completion writes a terminal row, so there is no join to the
     executors table and no "and then append the last point" rule.

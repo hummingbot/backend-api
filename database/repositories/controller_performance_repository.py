@@ -22,22 +22,27 @@ class ControllerPerformanceRepository:
 
     @staticmethod
     def _sample_by_interval(history: List[Dict], interval_minutes: int) -> List[Dict]:
+        """Thin a descending-timestamp series to one row per interval PER CONTROLLER.
+
+        The cursor is kept per (bot_name, controller_id), not once for the whole result.
+        A single global cursor makes `interval` a rate limit on the merged series, so an
+        unnarrowed query over a fleet drops whole controllers instead of thinning each of
+        them -- a 12-controller fleet answered with 11 of 12 at `1h`. Input order is
+        preserved, so the result stays descending by timestamp across controllers.
+        """
         if not history or interval_minutes <= 5:
             return history
 
         sampled = []
-        last_sampled_time = None
+        last_sampled_time: Dict[Tuple[Optional[str], Optional[str]], datetime] = {}
 
         for item in history:
+            scope = (item.get("bot_name"), item.get("controller_id"))
             item_time = datetime.fromisoformat(item["timestamp"].replace('Z', '+00:00'))
-            if last_sampled_time is None:
+            previous = last_sampled_time.get(scope)
+            if previous is None or (previous - item_time).total_seconds() / 60 >= interval_minutes:
                 sampled.append(item)
-                last_sampled_time = item_time
-            else:
-                time_diff = (last_sampled_time - item_time).total_seconds() / 60
-                if time_diff >= interval_minutes:
-                    sampled.append(item)
-                    last_sampled_time = item_time
+                last_sampled_time[scope] = item_time
 
         return sampled
 
