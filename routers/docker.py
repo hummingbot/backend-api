@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends
 
 from models import DockerImage
 from utils.bot_archiver import BotArchiver
+from utils.docker_images import get_image_tags
 from services.docker_service import DockerService
 from deps import get_docker_service, get_bot_archiver
 
@@ -37,9 +38,7 @@ async def available_images(image_name: str = None, docker_service: DockerService
         Dictionary with list of available image tags
     """
     available_images = docker_service.get_available_images()
-    if image_name:
-        return [tag for image in available_images["images"] for tag in image.tags if image_name in tag]
-    return [tag for tag in available_images["images"]]
+    return get_image_tags(available_images["images"], image_name)
 
 
 @router.get("/active-containers")
