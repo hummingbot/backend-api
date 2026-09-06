@@ -128,6 +128,17 @@ class AccountTradingInterface:
         """
         await self.ensure_connector(connector_name)
 
+        connector = self.connectors.get(connector_name)
+        if not connector:
+            raise ValueError(f"Connector {connector_name} not available. Check credentials.")
+
+        # Register the pair and sync pair-derived state (throttler limits) BEFORE
+        # the early return below: a no-op when already synced, and running it here
+        # means an already-tracked market still re-syncs any state a previous
+        # attempt failed to apply (#207). Raises ValueError for pairs the
+        # connector does not recognize — nothing is registered in that case.
+        await self._register_trading_pair_with_connector(connector, trading_pair)
+
         if connector_name not in self._markets:
             self._markets[connector_name] = set()
 
@@ -151,11 +162,6 @@ class AccountTradingInterface:
 
         self._markets[connector_name].add(trading_pair)
 
-        # Get connector from our account's connectors
-        connector = self.connectors.get(connector_name)
-        if not connector:
-            raise ValueError(f"Connector {connector_name} not available. Check credentials.")
-
         # Initialize order book via MarketDataService (uses best available connector)
         logger.info(f"Initializing order book for {connector_name}/{trading_pair}")
         success = await self._market_data_service.initialize_order_book(
@@ -169,9 +175,6 @@ class AccountTradingInterface:
             raise ValueError(f"Failed to initialize order book for {connector_name}/{trading_pair}")
 
         logger.info(f"Order book initialized successfully for {connector_name}/{trading_pair}")
-
-        # Register trading pair with connector
-        self._register_trading_pair_with_connector(connector, trading_pair)
 
         # Update balances to include tokens from new trading pair
         if hasattr(connector, '_update_balances'):
@@ -217,7 +220,7 @@ class AccountTradingInterface:
 
         logger.info(f"Removed market {connector_name}/{trading_pair}")
 
-    def _register_trading_pair_with_connector(
+    async def _register_trading_pair_with_connector(
         self,
         connector: ConnectorBase,
         trading_pair: str
@@ -225,12 +228,17 @@ class AccountTradingInterface:
         """
         Register a trading pair with the connector's internal structures.
 
+        Delegates to UnifiedConnectorService.sync_pair_derived_state so that state
+        built from the pair list at connector init (throttler pair-templated rate
+        limits) is refreshed too — see issue #207.
+
         Args:
             connector: The connector instance (ExchangePyBase)
             trading_pair: Trading pair to register
         """
-        if trading_pair not in connector._trading_pairs:
-            connector._trading_pairs.append(trading_pair)
+        already_registered = trading_pair in (getattr(connector, "_trading_pairs", None) or [])
+        await self._connector_service.sync_pair_derived_state(connector, trading_pair)
+        if not already_registered:
             logger.debug(f"Registered {trading_pair} with connector {type(connector).__name__}")
 
     # ========================================

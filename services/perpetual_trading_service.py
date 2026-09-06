@@ -66,6 +66,12 @@ class PerpetualTradingService:
         if not hasattr(connector, '_execute_set_leverage'):
             raise HTTPException(status_code=400, detail=f"Connector '{connector_name}' does not support leverage setting")
 
+        # Set-leverage endpoints can be pair-scoped (e.g. bybit's
+        # v5/position/set-leverage-{PAIR}); register the pair so the throttler
+        # learns its rate limit before the request — see issue #207.
+        from services.unified_connector_service import UnifiedConnectorService
+        await UnifiedConnectorService.sync_pair_derived_state(connector, trading_pair)
+
         try:
             await connector._execute_set_leverage(trading_pair, leverage)
             message = f"Leverage for {trading_pair} set to {leverage} on {connector_name}"
