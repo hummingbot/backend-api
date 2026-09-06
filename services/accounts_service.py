@@ -57,6 +57,7 @@ class AccountsService:
         "backpack_perpetual": "USDC",
         "cube": "USDC",
         "derive": "USDC",
+        "derive_options": "USDC",
         "derive_perpetual": "USDC",
         "dexalot": "USDC",
         "vertex": "USDC",
@@ -508,23 +509,36 @@ class AccountsService:
 
         for balance in balances:
             token = balance["token"]
-            if "USD" in token:
+            if "USD" in token and "-" not in token:
                 price = Decimal("1")
             else:
-                # Price using THIS connector's own tickers and its native quote (instant,
-                # in-memory cross-rate resolution). Using the connector's own quote avoids
-                # mismatches on exchanges that don't list the global quote (e.g. hyperliquid
-                # quotes in USDC/USD, not USDT).
-                base, quote = self._market_components(token, connector_name)
-                rate = self._market_data_service.get_rate_for_connector(connector_name, base, quote)
-                if rate and rate > 0:
-                    price = rate
+                # Check if connector provides custom token price (e.g. option contract mark price)
+                custom_price = None
+                if hasattr(connector, "get_token_price"):
+                    try:
+                        raw_price = connector.get_token_price(token)
+                        if raw_price is not None:
+                            custom_price = Decimal(str(raw_price))
+                    except Exception:
+                        custom_price = None
+
+                if custom_price is not None and custom_price > Decimal("0"):
+                    price = custom_price
                 else:
-                    # Queue for fallback batch fetch from exchange
-                    market = f"{base}-{quote}"
-                    missing_pairs.append(market)
-                    missing_indices.append(len(tokens_info))
-                    price = None  # resolved below
+                    # Price using THIS connector's own tickers and its native quote (instant,
+                    # in-memory cross-rate resolution). Using the connector's own quote avoids
+                    # mismatches on exchanges that don't list the global quote (e.g. hyperliquid
+                    # quotes in USDC/USD, not USDT).
+                    base, quote = self._market_components(token, connector_name)
+                    rate = self._market_data_service.get_rate_for_connector(connector_name, base, quote)
+                    if rate and rate > 0:
+                        price = rate
+                    else:
+                        # Queue for fallback batch fetch from exchange
+                        market = f"{base}-{quote}"
+                        missing_pairs.append(market)
+                        missing_indices.append(len(tokens_info))
+                        price = None  # resolved below
 
             tokens_info.append(balance_entry(
                 token,
@@ -566,9 +580,15 @@ class AccountsService:
                 logger.warning(f"Failed to get price for a pair: {result}")
                 continue
             pair, price = result
-            if price and price > 0:
-                self._last_known_prices[pair] = price
-            last_traded[pair] = price
+            price_dec = None
+            if price is not None:
+                try:
+                    price_dec = Decimal(str(price))
+                except Exception:
+                    pass
+            if price_dec is not None and price_dec > 0:
+                self._last_known_prices[pair] = price_dec
+                last_traded[pair] = price_dec
 
         # Fill in fallbacks for any pairs that failed
         missing_pairs = [pair for pair in trading_pairs if pair not in last_traded]

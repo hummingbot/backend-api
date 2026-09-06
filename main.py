@@ -28,6 +28,13 @@ def patched_save_to_yml(yml_path, cm):
 
 config_helpers.save_to_yml = patched_save_to_yml
 
+# Apply Derive options connector patch at application launch
+try:
+    from utils.patch_derive_connector import apply_derive_options_patch
+    apply_derive_options_patch()
+except Exception as e:
+    logging.warning(f"Could not apply Derive options patch on launch: {e}")
+
 from fastapi import Depends, FastAPI, HTTPException, Request, status  # noqa: E402
 from fastapi.exceptions import RequestValidationError  # noqa: E402
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402

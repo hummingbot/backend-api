@@ -592,10 +592,10 @@ TICKER_ADAPTERS: Dict[
 # ==================== Generic adapter (price-only, any connector) ====================
 
 # Candidate field names, ordered by preference, used to parse arbitrary exchange ticker rows.
-_SYMBOL_KEYS = ("symbol", "currency_pair", "instId", "symbolName", "trading_pair", "market", "pair", "s")
+_SYMBOL_KEYS = ("symbol", "currency_pair", "instId", "symbolName", "trading_pair", "market", "pair", "s", "instrument_name")
 _LAST_KEYS = ("last", "lastPrice", "lastPr", "close", "price", "c", "lastTradeRate")
-_BID_KEYS = ("bidPrice", "highest_bid", "bidPx", "buy", "bestBid", "bid", "b")
-_ASK_KEYS = ("askPrice", "lowest_ask", "askPx", "sell", "bestAsk", "ask", "a")
+_BID_KEYS = ("bidPrice", "highest_bid", "bidPx", "buy", "bestBid", "bid", "b", "best_bid", "best_bid_price")
+_ASK_KEYS = ("askPrice", "lowest_ask", "askPx", "sell", "bestAsk", "ask", "a", "best_ask", "best_ask_price")
 
 
 def _first(row: Dict[str, Any], keys: Tuple[str, ...]) -> Any:
@@ -610,7 +610,16 @@ def _first(row: Dict[str, Any], keys: Tuple[str, ...]) -> Any:
 def _heuristic_rows(raw: Any) -> List[Dict[str, Any]]:
     """Coerce an arbitrary 'all tickers' payload into a flat list of row dicts."""
     if isinstance(raw, list):
-        return [r for r in raw if isinstance(r, dict)]
+        rows = []
+        for r in raw:
+            if isinstance(r, dict):
+                if "symbol" in r and isinstance(r["symbol"], dict):
+                    merged = {k: v for k, v in r.items() if k != "symbol"}
+                    merged.update(r["symbol"])
+                    rows.append(merged)
+                else:
+                    rows.append(r)
+        return rows
     if isinstance(raw, dict):
         data = raw.get("data")
         if isinstance(data, list):
