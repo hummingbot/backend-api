@@ -236,7 +236,17 @@ else
     # is enabled, so unset is always the safe case here -- only an explicit,
     # wider value is worth a second look.
     if [ -z "$BIND_HOST" ] || [ "$BIND_HOST" = "127.0.0.1" ]; then
-        row ok "API_BIND" "127.0.0.1 (default) — port 8000 is loopback-only"
+        # Loopback is right, and it is also the reason a Condor on ANOTHER
+        # machine cannot reach this API. Nothing in either installer says so at
+        # the point that choice is made, and the symptom -- a connection that
+        # times out from the other box while everything here reports healthy --
+        # does not point at a bind address. Say it here, where someone is
+        # already looking for the answer.
+        if [ "$TS_ENABLED" = "true" ]; then
+            row ok "API_BIND" "127.0.0.1 (default) — port 8000 is loopback-only, and reaches the tailnet via tailscale serve"
+        else
+            row ok "API_BIND" "127.0.0.1 (default) — port 8000 is loopback-only. Only this machine can reach the API; a Condor running elsewhere needs Tailscale, an SSH tunnel, or an explicit API_BIND here"
+        fi
     elif [ "$TS_ENABLED" = "true" ] && is_tailscale_ip "$BIND_HOST"; then
         row ok "API_BIND" "$BIND_HOST looks like a tailscale IP — the documented way to expose 8000 on the tailnet without the sidecar"
     elif [ "$TS_ENABLED" = "true" ]; then
@@ -398,7 +408,8 @@ else
             if [ -n "$BIND_HOST" ] && is_tailscale_ip "$BIND_HOST"; then
                 row ok "Serve (port 8000)" "skipped — API_BIND=$BIND_HOST binds the API directly"
             elif ts_serve="$(tailscale serve status 2>&1)" && printf '%s' "$ts_serve" | grep -q "8000"; then
-                row ok "Serve (port 8000)" "forwarded to 127.0.0.1:8000 on this node"
+                _ts_name="$(tailnet_node_name || true)"
+                row ok "Serve (port 8000)" "forwarded to 127.0.0.1:8000${_ts_name:+ — reachable on the tailnet as http://$_ts_name:8000}"
             else
                 row fail "Serve (port 8000)" "port 8000 is not forwarded, so nothing on the tailnet can reach the API. Run: sudo tailscale serve --bg --tcp=8000 tcp://127.0.0.1:8000"
             fi
@@ -439,7 +450,17 @@ else
             if [ -n "$BIND_HOST" ] && is_tailscale_ip "$BIND_HOST"; then
                 row ok "Serve (port 8000)" "skipped — API_BIND=$BIND_HOST binds the API directly, without relying on tailscale serve"
             elif ts_serve="$($TS_EXEC serve status 2>&1)" && printf '%s' "$ts_serve" | grep -q "8000"; then
-                row ok "Serve (port 8000)" "proxied to the tailnet as http://${TS_HOSTNAME:-hummingbot-api}:8000"
+                # The name the node ACTUALLY got, not the one .env asked for.
+                # Tailscale suffixes a taken hostname, so on a shared tailnet
+                # that already has a "hummingbot-api" this node is
+                # "hummingbot-api-1" -- and printing the requested name here
+                # sends people to a machine that is not this one.
+                _ts_name="$(tailnet_node_name $TS_EXEC || true)"
+                if [ -n "$_ts_name" ] && [ "$_ts_name" != "${TS_HOSTNAME:-hummingbot-api}" ]; then
+                    row ok "Serve (port 8000)" "proxied to the tailnet as http://$_ts_name:8000 (TAILSCALE_HOSTNAME asked for '${TS_HOSTNAME:-hummingbot-api}'; that name was already taken on this tailnet, so use the one above)"
+                else
+                    row ok "Serve (port 8000)" "proxied to the tailnet as http://${_ts_name:-${TS_HOSTNAME:-hummingbot-api}}:8000"
+                fi
             else
                 row fail "Serve (port 8000)" "the node is on the tailnet but port 8000 is not proxied — with API_BIND=127.0.0.1 nothing can reach the API at all. Check tailscale-serve.json is mounted, then \`make deploy\`"
             fi

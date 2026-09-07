@@ -194,3 +194,31 @@ tailnet_needs_userspace() {
     # and a composite state that reported "sidecar" there would skip it.
     tailnet_has_native
 }
+
+# The name this node is ACTUALLY registered under, or empty if it cannot be
+# asked.
+#
+# Tailscale suffixes a hostname that is already taken: ask for
+# "hummingbot-api" on a tailnet that has one, and the node comes up as
+# "hummingbot-api-1". TAILSCALE_HOSTNAME therefore records what was
+# REQUESTED, and is the wrong thing to print in a URL -- on a shared team
+# tailnet it names somebody else's machine, which may well answer, so the
+# mistake surfaces as an authentication error rather than a name error.
+#
+# `--self=true --peers=false` prints exactly one line, whose second field is
+# the DNS label the control plane assigned. No JSON parser needed, which
+# matters in a sidecar image that has neither python nor jq.
+#
+# Pass the command that reaches the right daemon:
+#   tailnet_node_name                                    # this host
+#   tailnet_node_name docker exec hummingbot-tailscale tailscale   # sidecar
+tailnet_node_name() {
+    local line
+    if [ "$#" -eq 0 ]; then
+        set -- tailscale
+    fi
+    line="$("$@" status --self=true --peers=false 2>/dev/null | grep -v '^[[:space:]]*$' | head -1)" || return 1
+    [ -n "$line" ] || return 1
+    # 100.74.198.21  hummingbot-api-2  michaeld@  linux  -
+    printf '%s' "$line" | awk '{print $2}'
+}
