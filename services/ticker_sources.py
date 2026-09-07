@@ -230,6 +230,11 @@ TICKER_SPECS: Dict[str, TickerSpec] = {
         symbol="symbol", bid="bidPrice", ask="askPrice", last="lastPrice",
         base_volume="volume", quote_volume="quoteVolume",
     ),
+    "bing_x": TickerSpec(
+        path="/openApi/spot/v1/ticker/24hr", rows=_rows_at("data"),
+        symbol="symbol", bid="bidPrice", ask="askPrice", last="lastPrice",
+        base_volume="volume", quote_volume="quoteVolume",
+    ),
     # The futures 24hr ticker carries no bid/ask, so the price falls back to lastPrice.
     "binance_perpetual": TickerSpec(
         path="v1/ticker/24hr",  # the base URL already carries /fapi/
