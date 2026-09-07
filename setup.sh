@@ -243,6 +243,17 @@ ensure_curl_on_linux() {
 # --------------------------
 # Docker Install / Validation
 # --------------------------
+# Who is running this, for the docker-group messages below.
+#
+# $USER is set by login shells, and is NOT set by several ways this script is
+# legitimately run as root: `docker exec`, cloud-init, a systemd unit, some CI
+# runners. Under `set -euo pipefail` a bare "$USER" is then a fatal unbound
+# variable, and the install died before its first prompt -- on the root path,
+# where the group question is moot anyway. `id -un` always answers.
+current_user() {
+  printf '%s' "${USER:-$(id -un)}"
+}
+
 check_user_in_docker_group() {
   # Check if current user is already in docker group
   if [[ "${EUID}" -eq 0 ]]; then
@@ -251,7 +262,7 @@ check_user_in_docker_group() {
   fi
   
   if has_cmd getent && getent group docker >/dev/null 2>&1; then
-    if id -nG "$USER" 2>/dev/null | grep -qw docker; then
+    if id -nG "$(current_user)" 2>/dev/null | grep -qw docker; then
       return 0
     fi
   fi
@@ -262,14 +273,14 @@ check_user_in_docker_group() {
 add_user_to_docker_group() {
   # Only add user to docker group if not already a member
   if check_user_in_docker_group; then
-    echo "[OK] User '$USER' is already in the 'docker' group."
+    echo "[OK] User '$(current_user)' is already in the 'docker' group."
     return 0
   fi
   
   if has_cmd getent && getent group docker >/dev/null 2>&1; then
     if [[ "${EUID}" -ne 0 ]]; then
       echo "[INFO] Adding current user to 'docker' group (may require re-login)..."
-      sudo usermod -aG docker "$USER" >/dev/null 2>&1 || true
+      sudo usermod -aG docker "$(current_user)" >/dev/null 2>&1 || true
       echo "[OK] User added to docker group. You may need to log out and back in for this to take effect."
     fi
   fi
@@ -776,9 +787,30 @@ echo "  make doctor    # Verifies dependencies, .env, containers, port exposure 
 if [ "$TAILSCALE_ENABLED" = true ]; then
   echo ""
   echo "Tailscale:"
-  echo "  Docker deploy:  Tailscale sidecar starts automatically with 'make deploy'"
-  echo "  Source run:     Tailscale installs and connects automatically with 'make run'"
-  echo "  Condor URL:     http://$TAILSCALE_HOSTNAME:8000"
+  # Say what THIS mode will do. In host mode no sidecar starts and no node by
+  # that name ever registers, so the sidecar summary described a deployment
+  # that was not about to happen.
+  if [ "$TAILSCALE_MODE" = host ]; then
+    echo "  Mode:           host — port 8000 is served on the tailnet node this machine already has"
+    _ts_name="$(tailnet_node_name 2>/dev/null || true)"
+    if [ -n "$_ts_name" ]; then
+      echo "  Condor URL:     http://$_ts_name:8000"
+    else
+      echo "  Condor URL:     run 'make doctor' after 'make deploy' — it prints this node's name"
+    fi
+  else
+    echo "  Mode:           sidecar — the API gets a tailnet node of its own"
+    echo "  Docker deploy:  Tailscale sidecar starts automatically with 'make deploy'"
+    echo "  Source run:     Tailscale installs and connects automatically with 'make run'"
+    # Deliberately NOT printed as a settled URL. The node does not exist yet,
+    # and Tailscale suffixes a hostname that is already taken -- ask for
+    # "hummingbot-api" on a tailnet that has one and you get
+    # "hummingbot-api-1". Printing the requested name as the URL is how an
+    # install ends up pointed at somebody else's machine.
+    echo "  Condor URL:     http://$TAILSCALE_HOSTNAME:8000 — unless that name is already taken on"
+    echo "                  your tailnet, in which case this node registers as"
+    echo "                  $TAILSCALE_HOSTNAME-1, -2, ... 'make doctor' prints the real one."
+  fi
   echo "  Status:         make tailscale-status"
 fi
 echo ""
