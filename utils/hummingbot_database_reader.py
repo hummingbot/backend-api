@@ -1,13 +1,13 @@
-import os
-import pandas as pd
 import json
-from typing import List, Dict, Any
+import os
+from typing import Any, Dict, List
 
+import pandas as pd
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.strategy_v2.models.base import RunnableStatus
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
-from sqlalchemy import create_engine, insert, text, MetaData, Table, Column, VARCHAR, INT, FLOAT,  Integer, String, Float
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
 
@@ -25,7 +25,7 @@ class HummingbotDatabase:
     def _get_table_status(table_loader):
         try:
             data = table_loader()
-            return "Correct" if len(data) > 0 else f"Error - No records matched"
+            return "Correct" if len(data) > 0 else "Error - No records matched"
         except Exception as e:
             return f"Error - {str(e)}"
 
@@ -38,7 +38,8 @@ class HummingbotDatabase:
         controller_status = self._get_table_status(self.get_controllers_data)
         positions_status = self._get_table_status(self.get_positions)
         general_status = all(status == "Correct" for status in
-                             [trade_fill_status, orders_status, order_status_status, executors_status, controller_status, positions_status])
+                             [trade_fill_status, orders_status, order_status_status,
+                              executors_status, controller_status, positions_status])
         status = {"db_name": self.db_name,
                   "db_path": self.db_path,
                   "trade_fill": trade_fill_status,
@@ -51,10 +52,32 @@ class HummingbotDatabase:
                   }
         return status
 
+    @staticmethod
+    def _as_numeric(df: pd.DataFrame, columns: List[str]) -> pd.DataFrame:
+        """Force the given columns to a numeric dtype, in place.
+
+        A table with zero rows comes back from read_sql_query with `object` columns --
+        pandas has nothing to infer a dtype from -- and object dtype is not merely
+        cosmetic downstream: `.cumsum()` raises `TypeError: cumsum is not supported for
+        object dtype` on it however empty the frame is. That is a real archived bot, not a
+        synthetic one: a bot whose order size sits below the exchange minimum has every
+        order rejected and archives with an empty TradeFill table, which turned
+        /archived-bots/{db}/performance and /summary into 500s.
+
+        Coercing per column rather than with DataFrame.apply is deliberate: apply never
+        calls the function on a frame with no rows, so it leaves exactly the case this
+        exists for untouched.
+        """
+        for column in columns:
+            if column in df.columns:
+                df[column] = pd.to_numeric(df[column], errors="coerce")
+        return df
+
     def get_orders(self):
         with self.session_maker() as session:
             query = "SELECT * FROM 'Order'"
             orders = pd.read_sql_query(text(query), session.connection())
+            self._as_numeric(orders, ["amount", "price"])
             orders["amount"] = orders["amount"] / 1e6
             orders["price"] = orders["price"] / 1e6
             orders.rename(columns={"market": "connector_name", "symbol": "trading_pair"}, inplace=True)
@@ -67,6 +90,7 @@ class HummingbotDatabase:
             query = "SELECT * FROM TradeFill"
             trade_fills = pd.read_sql_query(text(query), session.connection())
             trade_fills.rename(columns={"market": "connector_name", "symbol": "trading_pair"}, inplace=True)
+            self._as_numeric(trade_fills, float_cols)
             trade_fills[float_cols] = trade_fills[float_cols] / 1e6
             trade_fills["cum_fees_in_quote"] = trade_fills.groupby(groupers)["trade_fee_in_quote"].cumsum()
             trade_fills["trade_fee"] = trade_fills.groupby(groupers)["cum_fees_in_quote"].diff()
@@ -96,116 +120,117 @@ class HummingbotDatabase:
             positions = pd.read_sql_query(text(query), session.connection())
             # Convert decimal fields from stored format (divide by 1e6)
             decimal_cols = ["volume_traded_quote", "amount", "breakeven_price", "unrealized_pnl_quote", "cum_fees_quote"]
+            self._as_numeric(positions, decimal_cols)
             positions[decimal_cols] = positions[decimal_cols] / 1e6
         return positions
 
     def calculate_trade_based_performance(self) -> pd.DataFrame:
         """
         Calculate trade-based performance metrics using vectorized pandas operations.
-        
+
         Returns:
             DataFrame with rolling performance metrics calculated per trading pair.
         """
         # Get trade fills data
         trades = self.get_trade_fills()
-        
+
         if len(trades) == 0:
             return pd.DataFrame()
-        
+
         # Sort by timestamp to ensure proper rolling calculation
         trades = trades.sort_values(['trading_pair', 'connector_name', 'timestamp']).copy()
-        
+
         # Create buy/sell indicator columns
         trades['is_buy'] = (trades['trade_type'].str.upper() == 'BUY').astype(int)
         trades['is_sell'] = (trades['trade_type'].str.upper() == 'SELL').astype(int)
-        
+
         # Calculate buy and sell amounts and values vectorized
         trades['buy_amount'] = trades['amount'] * trades['is_buy']
         trades['sell_amount'] = trades['amount'] * trades['is_sell']
         trades['buy_value'] = trades['price'] * trades['amount'] * trades['is_buy']
         trades['sell_value'] = trades['price'] * trades['amount'] * trades['is_sell']
-        
+
         # Group by trading_pair and connector_name for rolling calculations
         grouper = ['trading_pair', 'connector_name']
-        
+
         # Calculate cumulative volumes and values
         trades['buy_volume'] = trades.groupby(grouper)['buy_amount'].cumsum()
         trades['sell_volume'] = trades.groupby(grouper)['sell_amount'].cumsum()
         trades['buy_value_cum'] = trades.groupby(grouper)['buy_value'].cumsum()
         trades['sell_value_cum'] = trades.groupby(grouper)['sell_value'].cumsum()
-        
+
         # Calculate average prices (avoid division by zero)
         trades['buy_avg_price'] = trades['buy_value_cum'] / trades['buy_volume'].replace(0, pd.NA)
         trades['sell_avg_price'] = trades['sell_value_cum'] / trades['sell_volume'].replace(0, pd.NA)
-        
+
         # Forward fill average prices within each group to handle NaN values
         trades['buy_avg_price'] = trades.groupby(grouper)['buy_avg_price'].ffill().fillna(0)
         trades['sell_avg_price'] = trades.groupby(grouper)['sell_avg_price'].ffill().fillna(0)
-        
+
         # Calculate net position
         trades['net_position'] = trades['buy_volume'] - trades['sell_volume']
-        
+
         # Calculate realized PnL
         trades['realized_trade_pnl_pct'] = (
             (trades['sell_avg_price'] - trades['buy_avg_price']) / trades['buy_avg_price']
         ).fillna(0)
-        
+
         # Matched volume for realized PnL (minimum of buy and sell volumes)
         trades['matched_volume'] = pd.concat([trades['buy_volume'], trades['sell_volume']], axis=1).min(axis=1)
         trades['realized_trade_pnl_quote'] = trades['realized_trade_pnl_pct'] * trades['matched_volume'] * trades['buy_avg_price']
-        
+
         # Calculate unrealized PnL based on position direction
         # For long positions (net_position > 0): use current price vs buy_avg_price
         # For short positions (net_position < 0): use sell_avg_price vs current price
         trades['unrealized_trade_pnl_pct'] = 0.0
-        
+
         # Long positions
         long_mask = trades['net_position'] > 0
         trades.loc[long_mask, 'unrealized_trade_pnl_pct'] = (
-            (trades.loc[long_mask, 'price'] - trades.loc[long_mask, 'buy_avg_price']) / 
+            (trades.loc[long_mask, 'price'] - trades.loc[long_mask, 'buy_avg_price']) /
             trades.loc[long_mask, 'buy_avg_price']
         ).fillna(0)
-        
-        # Short positions  
+
+        # Short positions
         short_mask = trades['net_position'] < 0
         trades.loc[short_mask, 'unrealized_trade_pnl_pct'] = (
-            (trades.loc[short_mask, 'sell_avg_price'] - trades.loc[short_mask, 'price']) / 
+            (trades.loc[short_mask, 'sell_avg_price'] - trades.loc[short_mask, 'price']) /
             trades.loc[short_mask, 'sell_avg_price']
         ).fillna(0)
-        
+
         # Calculate unrealized PnL in quote currency
         trades['unrealized_trade_pnl_quote'] = 0.0
-        
+
         # Long positions: use buy_avg_price as reference
         long_mask = trades['net_position'] > 0
         trades.loc[long_mask, 'unrealized_trade_pnl_quote'] = (
-            trades.loc[long_mask, 'unrealized_trade_pnl_pct'] * 
-            trades.loc[long_mask, 'net_position'].abs() * 
+            trades.loc[long_mask, 'unrealized_trade_pnl_pct'] *
+            trades.loc[long_mask, 'net_position'].abs() *
             trades.loc[long_mask, 'buy_avg_price']
         )
-        
-        # Short positions: use sell_avg_price as reference  
+
+        # Short positions: use sell_avg_price as reference
         short_mask = trades['net_position'] < 0
         trades.loc[short_mask, 'unrealized_trade_pnl_quote'] = (
-            trades.loc[short_mask, 'unrealized_trade_pnl_pct'] * 
-            trades.loc[short_mask, 'net_position'].abs() * 
+            trades.loc[short_mask, 'unrealized_trade_pnl_pct'] *
+            trades.loc[short_mask, 'net_position'].abs() *
             trades.loc[short_mask, 'sell_avg_price']
         )
-        
+
         # Fees are already in trade_fee_in_quote column
         trades['fees_quote'] = trades['trade_fee_in_quote']
-        
+
         # Calculate net PnL
         trades['net_pnl_quote'] = (
-            trades['realized_trade_pnl_quote'] + 
-            trades['unrealized_trade_pnl_quote'] - 
+            trades['realized_trade_pnl_quote'] +
+            trades['unrealized_trade_pnl_quote'] -
             trades['fees_quote']
         )
-        
+
         # Calculate cumulative volume in quote currency
         trades['volume_quote'] = trades['price'] * trades['amount']
         trades['cum_volume_quote'] = trades.groupby(grouper)['volume_quote'].cumsum()
-        
+
         # Select and return relevant columns
         result_columns = [
             'timestamp', 'price', 'amount', 'trade_type', 'trading_pair', 'connector_name',
@@ -214,9 +239,8 @@ class HummingbotDatabase:
             'unrealized_trade_pnl_pct', 'unrealized_trade_pnl_quote',
             'fees_quote', 'net_pnl_quote', 'volume_quote', 'cum_volume_quote'
         ]
-        
-        return trades[result_columns].sort_values('timestamp')
 
+        return trades[result_columns].sort_values('timestamp')
 
 
 class PerformanceDataSource:
@@ -237,7 +261,8 @@ class PerformanceDataSource:
         executors["level_id"] = executors["config"].apply(lambda x: x.get("level_id"))
         executors["bep"] = executors["custom_info"].apply(lambda x: x["current_position_average_price"])
         executors["order_ids"] = executors["custom_info"].apply(lambda x: x.get("order_ids"))
-        executors["close_price"] = executors["custom_info"].apply(lambda x: x.get("close_price", x["current_position_average_price"]))
+        executors["close_price"] = executors["custom_info"].apply(
+            lambda x: x.get("close_price", x["current_position_average_price"]))
         executors["sl"] = executors["config"].apply(lambda x: x.get("stop_loss")).fillna(0)
         executors["tp"] = executors["config"].apply(lambda x: x.get("take_profit")).fillna(0)
         executors["tl"] = executors["config"].apply(lambda x: x.get("time_limit")).fillna(0)
