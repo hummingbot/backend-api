@@ -36,12 +36,11 @@ class BotRunRepository:
             deployment_status="DEPLOYED",
             run_status="CREATED"
         )
-        
+
         self.session.add(bot_run)
         await self.session.flush()
         await self.session.refresh(bot_run)
         return bot_run
-
 
     async def update_bot_run_stopped(
         self,
@@ -56,18 +55,24 @@ class BotRunRepository:
                 or_(BotRun.run_status == "RUNNING", BotRun.run_status == "CREATED")
             )
         ).order_by(desc(BotRun.deployed_at))
-        
+
         result = await self.session.execute(stmt)
         bot_run = result.scalar_one_or_none()
-        
+
         if bot_run:
             bot_run.run_status = "STOPPED" if not error_message else "ERROR"
-            bot_run.stopped_at = datetime.utcnow()
+            # Aware UTC, not utcnow(): stopped_at is TIMESTAMP(timezone=True), and a naive
+            # datetime is stored as if it were already in the session's local timezone, so
+            # utcnow() landed the row at the server's UTC offset behind the real stop time.
+            # stop-and-archive masked it -- update_bot_run_archived overwrote the value
+            # with a correct one -- but a bot stopped and never archived kept the skew,
+            # and run duration and performance-window attribution are read off this field.
+            bot_run.stopped_at = datetime.now(timezone.utc)
             bot_run.final_status = json.dumps(final_status) if final_status else None
             bot_run.error_message = error_message
             await self.session.flush()
             await self.session.refresh(bot_run)
-            
+
         return bot_run
 
     async def update_bot_run_archived(self, bot_name: str) -> Optional[BotRun]:
@@ -75,16 +80,16 @@ class BotRunRepository:
         stmt = select(BotRun).where(
             BotRun.bot_name == bot_name
         ).order_by(desc(BotRun.deployed_at))
-        
+
         result = await self.session.execute(stmt)
         bot_run = result.scalar_one_or_none()
-        
+
         if bot_run:
             bot_run.deployment_status = "ARCHIVED"
             bot_run.stopped_at = datetime.now(timezone.utc)
             await self.session.flush()
             await self.session.refresh(bot_run)
-            
+
         return bot_run
 
     async def get_bot_runs(
@@ -100,7 +105,7 @@ class BotRunRepository:
     ) -> List[BotRun]:
         """Get bot runs with optional filters."""
         stmt = select(BotRun)
-        
+
         conditions = []
         if bot_name:
             conditions.append(BotRun.bot_name == bot_name)
@@ -114,12 +119,12 @@ class BotRunRepository:
             conditions.append(BotRun.run_status == run_status)
         if deployment_status:
             conditions.append(BotRun.deployment_status == deployment_status)
-            
+
         if conditions:
             stmt = stmt.where(and_(*conditions))
-            
+
         stmt = stmt.order_by(desc(BotRun.deployed_at)).limit(limit).offset(offset)
-        
+
         result = await self.session.execute(stmt)
         return result.scalars().all()
 
@@ -134,7 +139,7 @@ class BotRunRepository:
         stmt = select(BotRun).where(
             BotRun.bot_name == bot_name
         ).order_by(desc(BotRun.deployed_at))
-        
+
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -146,7 +151,7 @@ class BotRunRepository:
                 BotRun.deployment_status == "DEPLOYED"
             )
         ).order_by(desc(BotRun.deployed_at))
-        
+
         result = await self.session.execute(stmt)
         return result.scalars().all()
 
@@ -156,7 +161,7 @@ class BotRunRepository:
         total_stmt = select(func.count(BotRun.id))
         total_result = await self.session.execute(total_stmt)
         total_runs = total_result.scalar()
-        
+
         # Active runs
         active_stmt = select(func.count(BotRun.id)).where(
             and_(
@@ -166,7 +171,7 @@ class BotRunRepository:
         )
         active_result = await self.session.execute(active_stmt)
         active_runs = active_result.scalar()
-        
+
         # Runs by strategy type
         strategy_stmt = select(
             BotRun.strategy_type,
@@ -174,7 +179,7 @@ class BotRunRepository:
         ).group_by(BotRun.strategy_type)
         strategy_result = await self.session.execute(strategy_stmt)
         strategy_counts = {row.strategy_type: row.count for row in strategy_result}
-        
+
         # Runs by status
         status_stmt = select(
             BotRun.run_status,
@@ -182,7 +187,7 @@ class BotRunRepository:
         ).group_by(BotRun.run_status)
         status_result = await self.session.execute(status_stmt)
         status_counts = {row.run_status: row.count for row in status_result}
-        
+
         return {
             "total_runs": total_runs,
             "active_runs": active_runs,
