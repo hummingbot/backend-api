@@ -121,7 +121,10 @@ async def get_performance_history(
 
     An executor's series is answered from executor_performance_snapshots alone, including
     its final value: completion writes a terminal row, so there is no join to the
-    executors table and no "and then append the last point" rule.
+    executors table and no "and then append the last point" rule. An executor that was
+    live when the API crashed gets its terminal row from the startup reap instead, carrying
+    `close_type: SYSTEM_CLEANUP` and the last figures observed before the crash -- an
+    approximated close, marked as one, rather than a series that never ends.
     """
     _reject_foreign_filters(
         subject,
@@ -215,7 +218,11 @@ async def get_latest_performance(
     same row. Live in-memory figures are what `/executors/` serves.
 
     A closed executor's latest row is its terminal row, carrying `is_terminal: true` and
-    its `close_type`, so "the final value" needs no separate call.
+    its `close_type`, so "the final value" needs no separate call. That holds for every
+    way an executor can close, including the startup reap of one a crash left behind
+    (`close_type: SYSTEM_CLEANUP`): this row and `GET /executors/{executor_id}` are written
+    in the same transaction, so the two surfaces cannot disagree about whether an executor
+    is done.
     """
     _reject_foreign_filters(
         subject,

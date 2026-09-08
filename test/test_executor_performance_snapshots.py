@@ -48,6 +48,20 @@ class _RecordingSession:
         self.flushed = 0
         self._results = list(results or [])
         self.executed = []
+        self.savepoints = 0
+
+    def begin_nested(self):
+        session = self
+
+        class _Savepoint:
+            async def __aenter__(self):
+                session.savepoints += 1
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+        return _Savepoint()
 
     def add_all(self, rows):
         self.added.extend(rows)
@@ -86,6 +100,17 @@ def _snapshot(executor_id="e-1", timestamp=NOW, is_terminal=False, close_type=No
         net_pnl_pct=Decimal(str(net_pnl_pct)),
         cum_fees_quote=Decimal(str(fees)),
         filled_amount_quote=Decimal(str(filled)),
+    )
+
+
+def _orphan(executor_id="e-1"):
+    """An ExecutorRecord-shaped stub with every column the reap reads or writes."""
+    return SimpleNamespace(
+        executor_id=executor_id, status="RUNNING", close_type=None, closed_at=None,
+        executor_type="position_executor", account_name="master_account",
+        connector_name="binance_perpetual", trading_pair="BTC-USDT", controller_id="main",
+        net_pnl_quote=Decimal("0"), net_pnl_pct=Decimal("0"),
+        cum_fees_quote=Decimal("0"), filled_amount_quote=Decimal("0"),
     )
 
 
@@ -468,11 +493,7 @@ class TestTheReapAdoptsTheLastSnapshot:
         """The restart bug. Without this the row keeps its creation-time zeros forever."""
         from database.repositories.executor_repository import ExecutorRepository
 
-        orphan = SimpleNamespace(
-            executor_id="e-1", status="RUNNING", close_type=None, closed_at=None,
-            net_pnl_quote=Decimal("0"), net_pnl_pct=Decimal("0"),
-            cum_fees_quote=Decimal("0"), filled_amount_quote=Decimal("0"),
-        )
+        orphan = _orphan()
         latest = _snapshot(net_pnl="17.25", net_pnl_pct="0.03", fees="0.9", filled="3100")
         session = _RecordingSession(results=[_scalars([orphan]), _scalars([latest])])
 
@@ -486,15 +507,76 @@ class TestTheReapAdoptsTheLastSnapshot:
         assert orphan.filled_amount_quote == Decimal("3100")
 
     @pytest.mark.asyncio
+    async def test_the_reap_writes_the_terminal_row_the_completion_path_would_have(self):
+        """The reap was the one way to reach TERMINATED with no terminal row behind it.
+
+        /performance/latest then served the last RUNNING snapshot forever -- is_terminal
+        false, close_type null -- while /executors/{id} said TERMINATED/SYSTEM_CLEANUP.
+        """
+        from database.repositories.executor_repository import ExecutorRepository
+
+        orphan = _orphan()
+        latest = _snapshot(net_pnl="17.25", net_pnl_pct="0.03", fees="0.9", filled="3100")
+        session = _RecordingSession(results=[_scalars([orphan]), _scalars([latest])])
+
+        await ExecutorRepository(session).cleanup_orphaned_executors(active_executor_ids=[])
+
+        rows = [row for row in session.added if isinstance(row, ExecutorPerformanceSnapshot)]
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.is_terminal is True
+        assert row.status == "TERMINATED"
+        assert row.close_type == "SYSTEM_CLEANUP"
+        # It says what the record says, so the two surfaces cannot disagree.
+        assert row.net_pnl_quote == orphan.net_pnl_quote == Decimal("17.25")
+        assert row.cum_fees_quote == orphan.cum_fees_quote == Decimal("0.9")
+        assert row.filled_amount_quote == orphan.filled_amount_quote == Decimal("3100")
+        assert row.timestamp == orphan.closed_at
+
+    @pytest.mark.asyncio
+    async def test_the_terminal_row_takes_its_identity_from_the_record(self):
+        """An executor orphaned before its first snapshot has no snapshot to read it from."""
+        from database.repositories.executor_repository import ExecutorRepository
+
+        orphan = _orphan()
+        session = _RecordingSession(results=[_scalars([orphan]), _scalars([])])
+
+        await ExecutorRepository(session).cleanup_orphaned_executors(active_executor_ids=[])
+
+        row = [r for r in session.added if isinstance(r, ExecutorPerformanceSnapshot)][0]
+        assert row.executor_id == "e-1"
+        assert row.executor_type == "position_executor"
+        assert row.account_name == "master_account"
+        assert row.connector_name == "binance_perpetual"
+        assert row.trading_pair == "BTC-USDT"
+        assert row.controller_id == "main"
+        assert row.is_terminal is True
+
+    @pytest.mark.asyncio
+    async def test_a_failing_snapshot_insert_does_not_roll_back_the_reap(self):
+        """The reap is the accounting; the terminal row is a point on a chart."""
+        from database.repositories.executor_repository import ExecutorRepository
+
+        orphan = _orphan()
+        session = _RecordingSession(results=[_scalars([orphan]), _scalars([])])
+
+        def _explode(rows):
+            raise RuntimeError("snapshot insert failed")
+
+        session.add_all = _explode
+
+        cleaned = await ExecutorRepository(session).cleanup_orphaned_executors(active_executor_ids=[])
+
+        assert cleaned == 1
+        assert orphan.status == "TERMINATED"
+        assert session.savepoints == 1
+
+    @pytest.mark.asyncio
     async def test_an_executor_with_no_snapshot_keeps_the_old_behaviour(self):
         """Created and orphaned inside one interval: there is nothing better to write."""
         from database.repositories.executor_repository import ExecutorRepository
 
-        orphan = SimpleNamespace(
-            executor_id="e-1", status="RUNNING", close_type=None, closed_at=None,
-            net_pnl_quote=Decimal("0"), net_pnl_pct=Decimal("0"),
-            cum_fees_quote=Decimal("0"), filled_amount_quote=Decimal("0"),
-        )
+        orphan = _orphan()
         session = _RecordingSession(results=[_scalars([orphan]), _scalars([])])
 
         cleaned = await ExecutorRepository(session).cleanup_orphaned_executors(active_executor_ids=[])
@@ -502,6 +584,11 @@ class TestTheReapAdoptsTheLastSnapshot:
         assert cleaned == 1
         assert orphan.status == "TERMINATED"
         assert orphan.net_pnl_quote == Decimal("0")
+        # Still gets a terminal row: the zeros are what the record itself books, and
+        # SYSTEM_CLEANUP is what marks the close as approximated on both surfaces.
+        row = [r for r in session.added if isinstance(r, ExecutorPerformanceSnapshot)][0]
+        assert row.is_terminal is True
+        assert row.net_pnl_quote == Decimal("0")
 
     @pytest.mark.asyncio
     async def test_nothing_orphaned_writes_nothing(self):
@@ -511,6 +598,7 @@ class TestTheReapAdoptsTheLastSnapshot:
 
         assert await ExecutorRepository(session).cleanup_orphaned_executors(active_executor_ids=[]) == 0
         assert session.flushed == 0
+        assert session.added == []
 
 
 # --------------------------------------------------------------------------------------

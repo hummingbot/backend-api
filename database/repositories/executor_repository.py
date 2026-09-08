@@ -1,6 +1,7 @@
 """
 Repository for executor database operations.
 """
+import logging
 import math
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -12,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import ExecutorOrder, ExecutorRecord, PositionHoldRecord
 from database.repositories.executor_performance_repository import ExecutorPerformanceRepository
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutorRepository:
@@ -662,6 +665,20 @@ class ExecutorRepository:
         still marked SYSTEM_CLEANUP -- a reader can tell an approximated close from a
         clean one.
 
+        Each reap also writes the terminal snapshot row that the normal completion path
+        writes, in this same transaction. Without it the reap was the one way an executor
+        could reach TERMINATED with no terminal row behind it, and the invariant the
+        /performance routes are built on -- a closed executor's latest row IS its terminal
+        row, answerable with no join back to `executors` -- held for every executor except
+        the ones a crash caught. /performance/latest served their last RUNNING snapshot
+        forever, is_terminal false and close_type null, while /executors/{id} reported
+        TERMINATED/SYSTEM_CLEANUP: two surfaces permanently disagreeing about whether an
+        executor was done.
+
+        The row carries the record's post-adoption figures, so it says exactly what the
+        record says, and its SYSTEM_CLEANUP close_type marks the series end as an
+        approximated close the same way the record does.
+
         Args:
             active_executor_ids: List of executor IDs currently active in memory
             close_type: Close type to set for cleaned up executors
@@ -686,6 +703,7 @@ class ExecutorRepository:
         )
 
         closed_at = datetime.now(timezone.utc)
+        terminal_rows = []
         for record in orphaned:
             record.status = "TERMINATED"
             record.close_type = close_type
@@ -698,6 +716,40 @@ class ExecutorRepository:
                 record.cum_fees_quote = Decimal(str(snapshot["cum_fees_quote"]))
                 record.filled_amount_quote = Decimal(str(snapshot["filled_amount_quote"]))
 
+            terminal_rows.append({
+                "executor_id": record.executor_id,
+                # The identity comes from the record, not the snapshot: an executor
+                # orphaned before its first snapshot has no snapshot to read it from, and
+                # these columns are constant across an executor's life either way.
+                "executor_type": record.executor_type or "unknown",
+                "account_name": record.account_name,
+                "connector_name": record.connector_name or "",
+                "trading_pair": record.trading_pair or "",
+                "controller_id": record.controller_id or "main",
+                "status": "TERMINATED",
+                "close_type": close_type,
+                "is_terminal": True,
+                "net_pnl_quote": record.net_pnl_quote,
+                "net_pnl_pct": record.net_pnl_pct,
+                "cum_fees_quote": record.cum_fees_quote,
+                "filled_amount_quote": record.filled_amount_quote,
+                "snapshot_timestamp": closed_at,
+            })
+
         await self.session.flush()
+
+        # Behind a SAVEPOINT for the same reason _persist_executor_completed's terminal
+        # row is: the reap is the accounting and the snapshot is a point on a chart, so a
+        # failing INSERT here must roll back only itself rather than abort the reap and
+        # leave the whole fleet RUNNING.
+        try:
+            async with self.session.begin_nested():
+                await ExecutorPerformanceRepository(self.session).save_snapshots(terminal_rows)
+        except Exception as e:
+            logger.error(
+                f"Reaped {len(orphaned)} orphaned executors but could not write their "
+                f"terminal performance snapshots; their series end at the last periodic "
+                f"row: {e}"
+            )
 
         return len(orphaned)
