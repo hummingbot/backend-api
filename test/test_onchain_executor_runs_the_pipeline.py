@@ -499,7 +499,8 @@ async def test_unpriced_gas_reports_zero_fees_and_says_so():
 
     await _run(executor)
 
-    assert executor.close_type == CloseType.COMPLETED  # the budget cannot be enforced without a price
+    assert executor.close_type == CloseType.FAILED
+    assert executor.get_custom_info()["reason"] == "gas_unpriced"
     assert executor.get_cum_fees_quote() == Decimal("0")
     info = executor.get_custom_info()
     assert info["fees_quote_source"] == "unpriced"
@@ -601,3 +602,41 @@ async def test_start_runs_the_whole_lifecycle_on_the_control_loop():
     assert executor.close_timestamp == 1000.0
     assert executor.get_custom_info()["phase"] == Phase.DONE.value
     assert client.closed is True
+
+
+@pytest.mark.asyncio
+async def test_default_pair_does_not_change_gas_budget_currency():
+    from hummingbot.core.rate_oracle.utils import find_rate
+
+    market = SimpleNamespace(get_rate=lambda base, quote: find_rate({"ETH-USDT": Decimal("3000")}, f"{base}-{quote}"))
+    client = FakePipelineClient()
+    executor = _executor(client, config=_config(max_gas_quote=Decimal("0.01")), strategy=_strategy(market))
+    await _run(executor)
+    assert executor.get_cum_fees_quote() == Decimal("0.063")
+    assert executor.get_custom_info()["reason"] == "gas_over_budget"
+    assert "commit" not in client.methods_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rate", [None, Decimal("NaN"), Decimal("Infinity"), Decimal("-1"), Decimal("0")])
+async def test_unavailable_or_invalid_price_blocks_budgeted_commit(rate):
+    client = FakePipelineClient()
+    market = SimpleNamespace(get_rate=lambda base, quote: rate)
+    executor = _executor(client, config=_config(max_gas_quote=Decimal("1")), strategy=_strategy(market))
+    await _run(executor)
+    assert executor.get_custom_info()["reason"] == "gas_unpriced"
+    assert "commit" not in client.methods_called()
+
+
+@pytest.mark.asyncio
+async def test_svm_gas_uses_sol_usdt():
+    pairs = []
+
+    def rate(base, quote):
+        pairs.append((base, quote))
+        return Decimal("150")
+    client = FakePipelineClient()
+    config = _config(chain="svm", chain_id=1, mode="operation", calls=None, operation="jupiter_swap", max_gas_quote=1)
+    executor = _executor(client, config=config, strategy=_strategy(SimpleNamespace(get_rate=rate)))
+    await _run(executor)
+    assert pairs and set(pairs) == {("SOL", "USDT")}

@@ -30,7 +30,6 @@ from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 from config import settings
 from models.onchain_executor import OnchainExecutorConfig, native_symbol
-from utils.trading_pair import split_trading_pair
 
 LOGGER_NAME = "hummingbot.strategy_v2.executors.onchain_executor"
 
@@ -207,10 +206,8 @@ class OnchainExecutor(ExecutorBase):
                 )
                 return
             if not self._fees_are_priced():
-                self.logger().warning(
-                    f"onchain_executor {self.config.id}: max_gas_quote set but no quote rate for "
-                    f"{native_symbol(self.config.chain_id)}; gas budget not enforced"
-                )
+                self._fail("gas_unpriced", message="Cannot verify max_gas_quote in USDT: gas estimate or price unavailable")
+                return
         if not self.config.commit:
             self.logger().info(f"onchain_executor {self.config.id}: dry run, simulation passed, not committing")
             self._finish(CloseType.COMPLETED)
@@ -308,19 +305,20 @@ class OnchainExecutor(ExecutorBase):
         if gas is None or gas.native_cost is None:
             return None
         try:
-            return Decimal(str(gas.native_cost))
+            cost = Decimal(str(gas.native_cost))
+            return cost if cost.is_finite() and cost >= 0 else None
         except (InvalidOperation, ValueError):
             return None
 
     def _quote_rate(self) -> Optional[Decimal]:
-        """Price of the native gas token in the pair's quote asset, when the API can supply one."""
+        """Price of the native gas token in USDT, shared with Condor risk accounting."""
         market_data = getattr(self._strategy, "_market_data_service", None)
         get_rate = getattr(market_data, "get_rate", None)
         if not callable(get_rate):
             return None
         try:
-            _base, quote_asset = split_trading_pair(self.config.trading_pair)
-            rate = get_rate(native_symbol(self.config.chain_id), quote_asset)
+            symbol = "SOL" if self.config.chain == "svm" else native_symbol(self.config.chain_id)
+            rate = get_rate(symbol, "USDT")
         except Exception:  # a malformed pair (InvalidTradingPair) or a rate source that throws: unpriced
             return None
         if inspect.isawaitable(rate):
@@ -332,7 +330,7 @@ class OnchainExecutor(ExecutorBase):
             rate = Decimal(str(rate))
         except (InvalidOperation, ValueError):
             return None
-        return rate if rate > 0 else None
+        return rate if rate.is_finite() and rate > 0 else None
 
     # ------------------------------------------------------------------ reporting
 
@@ -390,6 +388,7 @@ class OnchainExecutor(ExecutorBase):
             "gas_units": gas.units if gas is not None else None,
             "gas_price_wei": gas.price_wei if gas is not None else None,
             "gas_native_cost": gas.native_cost if gas is not None else None,
+            "quote_asset": "USDT",
             "fees_quote_source": "priced" if self._fees_are_priced() else "unpriced",
             "committed": bool(outcome is not None and outcome.confirmed),
             "outcome_kind": outcome.kind if outcome is not None else None,

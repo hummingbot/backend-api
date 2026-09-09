@@ -94,12 +94,12 @@ class OnchainExecutorConfig(ExecutorConfigBase):
     )
     notional_quote: Optional[Decimal] = Field(
         default=None,
-        description="Notional value of the bundle in quote currency, for the caller's own risk accounting (not enforced here)"
+        description="Notional value of the bundle in USDT, for the caller's own risk accounting (not enforced here)"
     )
     max_gas_quote: Optional[Decimal] = Field(
         default=None,
         gt=0,
-        description="Refuse to commit when the simulated gas cost, priced in quote currency, exceeds this"
+        description="Gas ceiling in USDT; refuse to commit if simulated gas exceeds it or cannot be priced"
     )
     keep_position: bool = Field(
         default=False,
