@@ -32,6 +32,8 @@ dependencies:
       - msgpack>=1.0.5
       - flake8
       - isort
+      - pytest
+      - pytest-asyncio
       - pre-commit
       - logfire
       - logfire[fastapi]

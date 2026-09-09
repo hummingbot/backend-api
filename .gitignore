@@ -190,7 +190,10 @@ conf/
 # IDE files
 .vscode/
 .idea/
-improvements
+# Local backlog of the /improvements and /design-feature workflows: working
+# notes for the burndown runs, not something the repo should carry.
+improvements/
+features/
 bots/gateway-files/
 .DS_Store
 Dockerfile.patched-hummingbot

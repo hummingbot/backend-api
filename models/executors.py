@@ -4,7 +4,7 @@ Pydantic models for executor API endpoints.
 These models wrap Hummingbot's executor configuration types and provide
 validation for the REST API.
 """
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional
 
@@ -128,7 +128,7 @@ class PositionHold(BaseModel):
         if executor_id and executor_id not in self.executor_ids:
             self.executor_ids.append(executor_id)
 
-        self.last_updated = datetime.utcnow()
+        self.last_updated = datetime.now(timezone.utc)
 
     def _calculate_realized_pnl(self):
         """Calculate realized PnL from matched buy/sell pairs and settle matched volume.
@@ -185,7 +185,7 @@ class PositionHold(BaseModel):
                 self.executor_ids.append(eid)
 
         self._calculate_realized_pnl()
-        self.last_updated = datetime.utcnow()
+        self.last_updated = datetime.now(timezone.utc)
 
 
 class PositionHoldResponse(BaseModel):

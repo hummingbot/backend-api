@@ -170,8 +170,14 @@ The `.env` file contains all configuration. Key settings:
 USERNAME=admin              # API username
 PASSWORD=admin              # API password
 CONFIG_PASSWORD=admin       # Encrypts bot credentials
+DEBUG_MODE=false            # Verbose logging and reload
 DATABASE_URL=...            # PostgreSQL connection
 GATEWAY_URL=...             # Gateway URL (for DEX)
+
+# Performance snapshots and backtests
+PERFORMANCE_EXECUTOR_SNAPSHOT_INTERVAL=60   # Seconds between live executor snapshots
+PERFORMANCE_RETENTION_DAYS=0                # Delete snapshots older than N days; 0 keeps them forever
+BACKTESTING_MAX_CONCURRENT=1                # Backtests allowed to run at once (one core each)
 
 # Tailscale (recommended for production)
 TAILSCALE_ENABLED=true
@@ -185,6 +191,11 @@ TAILSCALE_HOSTNAME=hummingbot-api   # MagicDNS hostname on your tailnet
 # API_BIND=127.0.0.1
 # DB_BIND=127.0.0.1
 ```
+
+These are the settings most deployments touch, not the full list: `config.py` is the authoritative
+list of every setting, its default and what it does. The `.env` that `setup.sh` generates also carries
+the optional `PERFORMANCE_`, `BACKTESTING_`, `MARKET_DATA_`, `CORS_` and `AWS_` groups as commented-out
+lines showing their defaults, so you can see and override them without leaving the file.
 
 Edit `.env` and restart with `make deploy` to apply changes.
 

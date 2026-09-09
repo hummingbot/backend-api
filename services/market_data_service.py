@@ -86,8 +86,12 @@ class MarketDataService:
         self._ticker_max_age = ticker_max_age
         self._ticker_subscription_ttl = ticker_subscription_ttl
 
-        # Candle feeds management
+        # Candle feeds management. Creating a feed validates the pair over the network before
+        # the feed lands in _candle_feeds, so a per-key lock collapses concurrent first-touch
+        # callers into a single creation; without it the losers of the race stay running with
+        # no reference in _candle_feeds and no teardown path can ever stop them.
         self._candle_feeds: Dict[str, Any] = {}
+        self._candle_feed_locks: Dict[str, asyncio.Lock] = {}
         self._last_access_times: Dict[str, float] = {}
         self._feed_configs: Dict[str, Tuple[FeedType, Any]] = {}
 
@@ -156,6 +160,7 @@ class MarketDataService:
                 logger.error(f"Error stopping candle feed {feed_key}: {e}")
 
         self._candle_feeds.clear()
+        self._candle_feed_locks.clear()
         self._last_access_times.clear()
         self._feed_configs.clear()
         self._tickers.clear()
@@ -487,13 +492,18 @@ class MarketDataService:
         )
 
         if feed_key not in self._candle_feeds:
-            self.validate_connector(config.connector)
-            feed = CandlesFactory.get_candle(config)
-            await self._validate_pair(feed, config.connector, config.trading_pair)
-            feed.start()
-            self._candle_feeds[feed_key] = feed
-            self._feed_configs[feed_key] = (FeedType.CANDLES, config)
-            logger.info(f"Created candle feed: {feed_key}")
+            lock = self._candle_feed_locks.setdefault(feed_key, asyncio.Lock())
+            async with lock:
+                # Validation is a couple of network round trips, so a concurrent caller may
+                # have created and registered the feed while we waited on the lock.
+                if feed_key not in self._candle_feeds:
+                    self.validate_connector(config.connector)
+                    feed = CandlesFactory.get_candle(config)
+                    await self._validate_pair(feed, config.connector, config.trading_pair)
+                    feed.start()
+                    self._candle_feeds[feed_key] = feed
+                    self._feed_configs[feed_key] = (FeedType.CANDLES, config)
+                    logger.info(f"Created candle feed: {feed_key}")
 
         self._last_access_times[feed_key] = time.time()
         return self._candle_feeds[feed_key]
@@ -527,6 +537,17 @@ class MarketDataService:
         feed = await self.get_candles_feed(config)
         return feed.candles_df
 
+    def _discard_candle_feed_lock(self, feed_key: str) -> None:
+        """
+        Drop the per-feed creation lock so the dict does not grow for the process lifetime.
+
+        A held lock is kept: its holder is mid-creation and will register the feed, and
+        handing the next caller a fresh lock would reopen the very race the lock closes.
+        """
+        lock = self._candle_feed_locks.get(feed_key)
+        if lock is not None and not lock.locked():
+            del self._candle_feed_locks[feed_key]
+
     def stop_candle_feed(self, config: CandlesConfig):
         """Stop a specific candle feed."""
         feed_key = self._generate_feed_key(
@@ -537,6 +558,7 @@ class MarketDataService:
             try:
                 self._candle_feeds[feed_key].stop()
                 del self._candle_feeds[feed_key]
+                self._discard_candle_feed_lock(feed_key)
                 logger.info(f"Stopped candle feed: {feed_key}")
             except Exception as e:
                 logger.error(f"Error stopping candle feed {feed_key}: {e}")
@@ -1013,6 +1035,7 @@ class MarketDataService:
                 if feed_type == FeedType.CANDLES and feed_key in self._candle_feeds:
                     self._candle_feeds[feed_key].stop()
                     del self._candle_feeds[feed_key]
+                    self._discard_candle_feed_lock(feed_key)
 
                 del self._last_access_times[feed_key]
                 del self._feed_configs[feed_key]
@@ -1052,6 +1075,7 @@ class MarketDataService:
                 if feed_type == FeedType.CANDLES and feed_key in self._candle_feeds:
                     self._candle_feeds[feed_key].stop()
                     del self._candle_feeds[feed_key]
+                    self._discard_candle_feed_lock(feed_key)
 
                 del self._last_access_times[feed_key]
                 del self._feed_configs[feed_key]

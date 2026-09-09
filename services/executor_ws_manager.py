@@ -10,21 +10,19 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional
+from functools import partial
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from fastapi import WebSocket
+from fastapi.websockets import WebSocketDisconnect
 
+from config import settings
 from services.bots_orchestrator import BotsOrchestrator
 from services.executor_service import ExecutorService
 from services.market_data_service import MarketDataService
 from utils.trading_pair import InvalidTradingPair, split_trading_pair
 
 logger = logging.getLogger(__name__)
-
-# Update interval bounds (seconds)
-MIN_UPDATE_INTERVAL = 0.5
-MAX_UPDATE_INTERVAL = 60.0
-DEFAULT_UPDATE_INTERVAL = 2.0
 
 SUBSCRIPTION_TYPES = {
     "executors",
@@ -66,6 +64,23 @@ class ExecutorSubscription:
     last_sent_hash: Optional[str] = None
     # For logs: track count to send only new entries
     last_log_count: int = 0
+    # Whether the client has already been told this channel is failing, so a
+    # persistent fault sends one error frame instead of one per interval.
+    error_notified: bool = False
+
+
+# A fetcher turns a subscription into the payload to hash and push; an extra
+# builder derives additional top-level frame keys from that payload.
+FetchFn = Callable[["ExecutorSubscription"], Awaitable[Any]]
+ExtraFn = Callable[[Any], Dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class PushSpec:
+    """How one hash-and-push subscription type is fetched and framed."""
+    fetch: FetchFn
+    msg_type: str
+    extra: Optional[ExtraFn] = None
 
 
 def _compute_hash(data: Any) -> str:
@@ -75,10 +90,25 @@ def _compute_hash(data: Any) -> str:
 
 
 def _clamp_interval(interval: Optional[float]) -> float:
-    """Clamp update interval to allowed range."""
+    """Clamp update interval to the configured executor WebSocket range.
+
+    Raises ValueError when the client-supplied value is not a number. The
+    comparisons below would otherwise raise TypeError out of handle_subscribe,
+    surfacing as an unhandled exception instead of the error frame every other
+    malformed-input path returns (CORR-113).
+    """
+    md = settings.market_data
     if interval is None:
-        return DEFAULT_UPDATE_INTERVAL
-    return max(MIN_UPDATE_INTERVAL, min(MAX_UPDATE_INTERVAL, interval))
+        return md.ws_executor_default_update_interval
+    # bool is an int subclass, so True would otherwise clamp to the floor.
+    if isinstance(interval, bool) or not isinstance(interval, (int, float)):
+        raise ValueError(
+            f"update_interval must be a number, got {type(interval).__name__}"
+        )
+    return max(
+        md.ws_executor_min_update_interval,
+        min(md.ws_executor_max_update_interval, interval),
+    )
 
 
 class ExecutorWebSocketManager:
@@ -115,7 +145,11 @@ class ExecutorWebSocketManager:
             )
             return
 
-        interval = _clamp_interval(msg.get("update_interval"))
+        try:
+            interval = _clamp_interval(msg.get("update_interval"))
+        except ValueError as e:
+            await self._send_error(websocket, str(e))
+            return
 
         # Build subscription
         sub = ExecutorSubscription(
@@ -240,198 +274,101 @@ class ExecutorWebSocketManager:
     # Push loop dispatch
     # ------------------------------------------------------------------
 
-    def _get_push_fn(self, sub_type: str):
+    def _push_specs(self) -> Dict[str, PushSpec]:
+        """Map every hash-and-push subscription type to how it is fetched and framed."""
         return {
-            "executors": self._executors_push_loop,
-            "executor_detail": self._executor_detail_push_loop,
-            "executor_summary": self._summary_push_loop,
-            "performance": self._performance_push_loop,
-            "positions": self._positions_push_loop,
-            "executor_logs": self._logs_push_loop,
-            "bot_status": self._bot_status_push_loop,
-            "all_bots_status": self._all_bots_status_push_loop,
-        }[sub_type]
+            "executors": PushSpec(
+                fetch=self._fetch_executors,
+                msg_type="executors",
+                extra=lambda data: {"total_count": len(data)},
+            ),
+            "executor_detail": PushSpec(
+                fetch=self._fetch_executor_detail,
+                msg_type="executor_detail",
+            ),
+            "executor_summary": PushSpec(
+                fetch=self._fetch_summary,
+                msg_type="executor_summary",
+            ),
+            "performance": PushSpec(
+                fetch=self._fetch_performance,
+                msg_type="performance",
+            ),
+            "positions": PushSpec(
+                fetch=self._fetch_positions,
+                msg_type="positions",
+            ),
+            "bot_status": PushSpec(
+                fetch=self._fetch_bot_status,
+                msg_type="bot_status",
+            ),
+            "all_bots_status": PushSpec(
+                fetch=self._fetch_all_bots_status,
+                msg_type="all_bots_status",
+                extra=lambda data: {"bot_count": len(data)},
+            ),
+        }
+
+    def _get_push_fn(self, sub_type: str):
+        """Resolve a subscription type to the coroutine function that drives its loop."""
+        if sub_type == "executor_logs":
+            # Logs key on last_log_count, not on a payload hash — its own loop.
+            return self._logs_push_loop
+        spec = self._push_specs()[sub_type]
+        return partial(
+            self._push_loop,
+            fetch=spec.fetch,
+            msg_type=spec.msg_type,
+            extra=spec.extra,
+        )
 
     # ------------------------------------------------------------------
     # Push loops
     # ------------------------------------------------------------------
 
-    async def _executors_push_loop(
-        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
+    async def _push_loop(
+        self,
+        conn_id: str,
+        websocket: WebSocket,
+        sub: ExecutorSubscription,
+        fetch: FetchFn,
+        msg_type: str,
+        extra: Optional[ExtraFn] = None,
     ) -> None:
-        """Poll get_executors() with filters and push on change."""
+        """Poll `fetch` on the subscription interval and push only when the data changes."""
         try:
             while True:
                 try:
-                    filters = sub.filters
-                    executors = await self._executor_service.get_executors(
-                        account_name=filters.get("account_name"),
-                        connector_name=filters.get("connector_name"),
-                        trading_pair=filters.get("trading_pair"),
-                        executor_type=filters.get("executor_type"),
-                        status=filters.get("status"),
-                        controller_id=filters.get("controller_id"),
-                    )
-                    h = _compute_hash(executors)
-                    if h != sub.last_sent_hash:
-                        sub.last_sent_hash = h
-                        await websocket.send_json({
-                            "type": "executors",
-                            "subscription_id": sub.sub_id,
-                            "data": executors,
-                            "total_count": len(executors),
-                            "timestamp": time.time(),
-                        })
-                except Exception as e:
-                    logger.error(f"[WS-Exec] executors push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
-        except asyncio.CancelledError:
-            pass
-
-    async def _executor_detail_push_loop(
-        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
-    ) -> None:
-        """Poll get_executor() for a single executor and push on change."""
-        try:
-            while True:
-                try:
-                    data = await self._executor_service.get_executor(sub.executor_id)
+                    data = await fetch(sub)
+                    sub.error_notified = False
                     h = _compute_hash(data)
                     if h != sub.last_sent_hash:
                         sub.last_sent_hash = h
-                        await websocket.send_json({
-                            "type": "executor_detail",
+                        message = {
+                            "type": msg_type,
                             "subscription_id": sub.sub_id,
                             "data": data,
-                            "timestamp": time.time(),
-                        })
+                        }
+                        if extra is not None:
+                            message.update(extra(data))
+                        message["timestamp"] = time.time()
+                        if not await self._send_or_stop(conn_id, websocket, sub, msg_type, message):
+                            break
                 except Exception as e:
-                    logger.error(f"[WS-Exec] executor_detail push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
-        except asyncio.CancelledError:
-            pass
-
-    async def _summary_push_loop(
-        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
-    ) -> None:
-        """Poll get_summary() and push on change."""
-        try:
-            while True:
-                try:
-                    data = self._executor_service.get_summary()
-                    h = _compute_hash(data)
-                    if h != sub.last_sent_hash:
-                        sub.last_sent_hash = h
-                        await websocket.send_json({
-                            "type": "executor_summary",
-                            "subscription_id": sub.sub_id,
-                            "data": data,
-                            "timestamp": time.time(),
-                        })
-                except Exception as e:
-                    logger.error(f"[WS-Exec] summary push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
-        except asyncio.CancelledError:
-            pass
-
-    async def _performance_push_loop(
-        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
-    ) -> None:
-        """Poll get_performance_report() and push on change."""
-        try:
-            while True:
-                try:
-                    data = await self._executor_service.get_performance_report(
-                        controller_id=sub.controller_id,
-                        market_data_service=self._market_data_service,
-                    )
-                    h = _compute_hash(data)
-                    if h != sub.last_sent_hash:
-                        sub.last_sent_hash = h
-                        await websocket.send_json({
-                            "type": "performance",
-                            "subscription_id": sub.sub_id,
-                            "data": data,
-                            "timestamp": time.time(),
-                        })
-                except Exception as e:
-                    logger.error(f"[WS-Exec] performance push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
-        except asyncio.CancelledError:
-            pass
-
-    async def _positions_push_loop(
-        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
-    ) -> None:
-        """Poll get_positions_held() with unrealized PnL and push on change."""
-        try:
-            while True:
-                try:
-                    positions = self._executor_service.get_positions_held(
-                        controller_id=sub.controller_id,
-                    )
-                    # Build response dicts with unrealized PnL
-                    position_dicts = []
-                    total_realized = 0.0
-                    total_unrealized = None
-
-                    for p in positions:
-                        unrealized_pnl = None
-                        # See routers/executors.py: a hyphenated base symbol failed the
-                        # old length check and dropped the PnL without saying so.
-                        try:
-                            base, quote = split_trading_pair(p.trading_pair)
-                        except InvalidTradingPair:
-                            base = quote = None
-                        if base and quote:
-                            rate = self._market_data_service.get_rate(base, quote)
-                            if rate is not None:
-                                unrealized_pnl = float(p.get_unrealized_pnl(rate))
-                                if total_unrealized is None:
-                                    total_unrealized = 0.0
-                                total_unrealized += unrealized_pnl
-
-                        total_realized += float(p.realized_pnl_quote)
-                        position_dicts.append({
-                            "trading_pair": p.trading_pair,
-                            "connector_name": p.connector_name,
-                            "account_name": p.account_name,
-                            "controller_id": p.controller_id,
-                            "buy_amount_base": float(p.buy_amount_base),
-                            "buy_amount_quote": float(p.buy_amount_quote),
-                            "sell_amount_base": float(p.sell_amount_base),
-                            "sell_amount_quote": float(p.sell_amount_quote),
-                            "net_amount_base": float(p.net_amount_base),
-                            "buy_breakeven_price": float(p.buy_breakeven_price) if p.buy_breakeven_price else None,
-                            "sell_breakeven_price": float(p.sell_breakeven_price) if p.sell_breakeven_price else None,
-                            "matched_amount_base": float(p.matched_amount_base),
-                            "unmatched_amount_base": float(p.unmatched_amount_base),
-                            "position_side": p.position_side,
-                            "realized_pnl_quote": float(p.realized_pnl_quote),
-                            "unrealized_pnl_quote": unrealized_pnl,
-                            "executor_count": len(p.executor_ids),
-                            "executor_ids": p.executor_ids,
-                            "last_updated": p.last_updated.isoformat() if p.last_updated else None,
-                        })
-
-                    payload = {
-                        "total_positions": len(positions),
-                        "total_realized_pnl": total_realized,
-                        "total_unrealized_pnl": total_unrealized,
-                        "positions": position_dicts,
-                    }
-
-                    h = _compute_hash(payload)
-                    if h != sub.last_sent_hash:
-                        sub.last_sent_hash = h
-                        await websocket.send_json({
-                            "type": "positions",
-                            "subscription_id": sub.sub_id,
-                            "data": payload,
-                            "timestamp": time.time(),
-                        })
-                except Exception as e:
-                    logger.error(f"[WS-Exec] positions push error: {e}", exc_info=True)
+                    logger.error(f"[WS-Exec] {msg_type} push error: {e}", exc_info=True)
+                    # Tell the subscriber the channel is failing. Staying silent leaves
+                    # the last good frame on screen with nothing marking it stale, and
+                    # a fetch that degrades to zeroes instead of raising would render as
+                    # real data (see get_performance_report, CORR-111).
+                    if not sub.error_notified:
+                        sub.error_notified = True
+                        # The recovery frame must be sent even if the payload is
+                        # byte-identical to the one that preceded the outage.
+                        sub.last_sent_hash = None
+                        if not await self._send_or_stop(
+                            conn_id, websocket, sub, msg_type, self._error_frame(sub, msg_type, e)
+                        ):
+                            break
                 await asyncio.sleep(sub.update_interval)
         except asyncio.CancelledError:
             pass
@@ -452,85 +389,176 @@ class ExecutorWebSocketManager:
                     if current_count > sub.last_log_count:
                         new_logs = all_logs[sub.last_log_count:]
                         sub.last_log_count = current_count
-                        await websocket.send_json({
+                        message = {
                             "type": "executor_logs",
                             "subscription_id": sub.sub_id,
                             "data": new_logs,
                             "total_count": current_count,
                             "timestamp": time.time(),
-                        })
-                except Exception as e:
-                    logger.error(f"[WS-Exec] logs push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
-        except asyncio.CancelledError:
-            pass
-
-    async def _bot_status_push_loop(
-        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
-    ) -> None:
-        """Poll get_bot_status() for a single bot and push on change (no logs)."""
-        try:
-            while True:
-                try:
-                    raw_status = self._bots_orchestrator.get_bot_status(sub.bot_name)
-                    # Strip logs — only send status, performance, custom_info
-                    payload = {
-                        "bot_name": sub.bot_name,
-                        "status": raw_status.get("status"),
-                        "performance": raw_status.get("performance", {}),
-                        "recently_active": raw_status.get("recently_active", False),
-                    }
-                    h = _compute_hash(payload)
-                    if h != sub.last_sent_hash:
-                        sub.last_sent_hash = h
-                        await websocket.send_json({
-                            "type": "bot_status",
-                            "subscription_id": sub.sub_id,
-                            "data": payload,
-                            "timestamp": time.time(),
-                        })
-                except Exception as e:
-                    logger.error(f"[WS-Exec] bot_status push error: {e}", exc_info=True)
-                await asyncio.sleep(sub.update_interval)
-        except asyncio.CancelledError:
-            pass
-
-    async def _all_bots_status_push_loop(
-        self, conn_id: str, websocket: WebSocket, sub: ExecutorSubscription
-    ) -> None:
-        """Poll get_all_bots_status() and push on change (no logs)."""
-        try:
-            while True:
-                try:
-                    raw = self._bots_orchestrator.get_all_bots_status()
-                    # Strip logs from each bot
-                    payload = {}
-                    for bot_name, bot_data in raw.items():
-                        payload[bot_name] = {
-                            "status": bot_data.get("status"),
-                            "source": bot_data.get("source"),
-                            "performance": bot_data.get("performance", {}),
-                            "recently_active": bot_data.get("recently_active", False),
                         }
-                    h = _compute_hash(payload)
-                    if h != sub.last_sent_hash:
-                        sub.last_sent_hash = h
-                        await websocket.send_json({
-                            "type": "all_bots_status",
-                            "subscription_id": sub.sub_id,
-                            "data": payload,
-                            "bot_count": len(payload),
-                            "timestamp": time.time(),
-                        })
+                        if not await self._send_or_stop(
+                            conn_id, websocket, sub, "executor_logs", message
+                        ):
+                            break
                 except Exception as e:
-                    logger.error(f"[WS-Exec] all_bots_status push error: {e}", exc_info=True)
+                    logger.error(f"[WS-Exec] executor_logs push error: {e}", exc_info=True)
                 await asyncio.sleep(sub.update_interval)
         except asyncio.CancelledError:
             pass
+
+    # ------------------------------------------------------------------
+    # Fetchers
+    #
+    # One per hash-and-push subscription type. They normalise the mixed
+    # sync/async service calls and own any per-type payload shaping, so the
+    # generic loop above only ever sees "await fetch(sub) -> data".
+    # ------------------------------------------------------------------
+
+    async def _fetch_executors(self, sub: ExecutorSubscription) -> Any:
+        filters = sub.filters
+        return await self._executor_service.get_executors(
+            account_name=filters.get("account_name"),
+            connector_name=filters.get("connector_name"),
+            trading_pair=filters.get("trading_pair"),
+            executor_type=filters.get("executor_type"),
+            status=filters.get("status"),
+            controller_id=filters.get("controller_id"),
+        )
+
+    async def _fetch_executor_detail(self, sub: ExecutorSubscription) -> Any:
+        return await self._executor_service.get_executor(sub.executor_id)
+
+    async def _fetch_summary(self, sub: ExecutorSubscription) -> Any:
+        return self._executor_service.get_summary()
+
+    async def _fetch_performance(self, sub: ExecutorSubscription) -> Any:
+        return await self._executor_service.get_performance_report(
+            controller_id=sub.controller_id,
+            market_data_service=self._market_data_service,
+        )
+
+    async def _fetch_positions(self, sub: ExecutorSubscription) -> Dict[str, Any]:
+        """Positions held, enriched with unrealized PnL from the current rates."""
+        positions = self._executor_service.get_positions_held(
+            controller_id=sub.controller_id,
+        )
+        position_dicts = []
+        total_realized = 0.0
+        total_unrealized = None
+
+        for p in positions:
+            unrealized_pnl = None
+            # See routers/executors.py: a hyphenated base symbol failed the
+            # old length check and dropped the PnL without saying so.
+            try:
+                base, quote = split_trading_pair(p.trading_pair)
+            except InvalidTradingPair:
+                base = quote = None
+            if base and quote:
+                rate = self._market_data_service.get_rate(base, quote)
+                if rate is not None:
+                    unrealized_pnl = float(p.get_unrealized_pnl(rate))
+                    if total_unrealized is None:
+                        total_unrealized = 0.0
+                    total_unrealized += unrealized_pnl
+
+            total_realized += float(p.realized_pnl_quote)
+            position_dicts.append({
+                "trading_pair": p.trading_pair,
+                "connector_name": p.connector_name,
+                "account_name": p.account_name,
+                "controller_id": p.controller_id,
+                "buy_amount_base": float(p.buy_amount_base),
+                "buy_amount_quote": float(p.buy_amount_quote),
+                "sell_amount_base": float(p.sell_amount_base),
+                "sell_amount_quote": float(p.sell_amount_quote),
+                "net_amount_base": float(p.net_amount_base),
+                "buy_breakeven_price": float(p.buy_breakeven_price) if p.buy_breakeven_price else None,
+                "sell_breakeven_price": float(p.sell_breakeven_price) if p.sell_breakeven_price else None,
+                "matched_amount_base": float(p.matched_amount_base),
+                "unmatched_amount_base": float(p.unmatched_amount_base),
+                "position_side": p.position_side,
+                "realized_pnl_quote": float(p.realized_pnl_quote),
+                "unrealized_pnl_quote": unrealized_pnl,
+                "executor_count": len(p.executor_ids),
+                "executor_ids": p.executor_ids,
+                "last_updated": p.last_updated.isoformat() if p.last_updated else None,
+            })
+
+        return {
+            "total_positions": len(positions),
+            "total_realized_pnl": total_realized,
+            "total_unrealized_pnl": total_unrealized,
+            "positions": position_dicts,
+        }
+
+    async def _fetch_bot_status(self, sub: ExecutorSubscription) -> Dict[str, Any]:
+        """Single bot status, with the logs stripped out."""
+        raw_status = self._bots_orchestrator.get_bot_status(sub.bot_name)
+        return {
+            "bot_name": sub.bot_name,
+            "status": raw_status.get("status"),
+            "performance": raw_status.get("performance", {}),
+            "recently_active": raw_status.get("recently_active", False),
+        }
+
+    async def _fetch_all_bots_status(self, sub: ExecutorSubscription) -> Dict[str, Any]:
+        """Every bot's status, with the logs stripped out of each."""
+        raw = self._bots_orchestrator.get_all_bots_status()
+        return {
+            bot_name: {
+                "status": bot_data.get("status"),
+                "source": bot_data.get("source"),
+                "performance": bot_data.get("performance", {}),
+                "recently_active": bot_data.get("recently_active", False),
+            }
+            for bot_name, bot_data in raw.items()
+        }
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    async def _send_or_stop(
+        conn_id: str,
+        websocket: WebSocket,
+        sub: ExecutorSubscription,
+        msg_type: str,
+        message: Dict[str, Any],
+    ) -> bool:
+        """Push one frame; return False when the client is gone and the loop must stop.
+
+        Mirrors services/websocket_manager.py, which breaks out of its push loops
+        on a disconnect instead of logging an error every interval. Only the send
+        is guarded: a RuntimeError raised by a fetch is a service fault, not a
+        dropped client, and must stay a logged-and-retried error.
+        """
+        try:
+            await websocket.send_json(message)
+            return True
+        except (WebSocketDisconnect, RuntimeError):
+            logger.info(
+                f"[WS-Exec] {conn_id} disconnected, stopping {msg_type} push [{sub.sub_id}]"
+            )
+            return False
+
+    @staticmethod
+    def _error_frame(
+        sub: ExecutorSubscription, msg_type: str, error: Exception
+    ) -> Dict[str, Any]:
+        """The frame a push loop sends when its fetch failed.
+
+        Carries the subscription and channel so a client showing several
+        subscriptions can mark the right one as failing rather than stale.
+        """
+        return {
+            "type": "error",
+            "subscription_id": sub.sub_id,
+            "channel": msg_type,
+            "message": f"{msg_type} update failed: {error}",
+            "timestamp": time.time(),
+        }
 
     @staticmethod
     async def _send_error(websocket: WebSocket, message: str) -> None:

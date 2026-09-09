@@ -93,6 +93,19 @@ class LPRebalancerConfig(ControllerConfigBase):
         description="Extra % to swap beyond deficit to account for slippage (e.g., 0.01 = 0.01%)"
     )
 
+    @field_validator("lp_provider")
+    @classmethod
+    def validate_lp_provider(cls, v: str) -> str:
+        """The trading type is never guessed: Gateway rejects a guessed one with a 400, so an
+        untyped provider has to fail at config load rather than mid-operation. The core's
+        parse_provider defaults an untyped provider to "router", which is the wrong branch
+        entirely for an LP controller, so the contract is enforced here instead."""
+        if "/" not in v:
+            raise ValueError(
+                f"Invalid lp_provider '{v}': expected 'name/type' (e.g. 'meteora/clmm')"
+            )
+        return v
+
     @field_validator("sell_price_min", "sell_price_max", "buy_price_min", "buy_price_max", mode="before")
     @classmethod
     def validate_price_limits(cls, v):
@@ -173,7 +186,9 @@ class LPRebalancer(ControllerBase):
         super().__init__(config, *args, **kwargs)
         self.config: LPRebalancerConfig = config
 
-        # Parse lp_provider into dex_name and trading_type for gateway calls
+        # Parse lp_provider into dex_name and trading_type for gateway calls. The config
+        # validator guarantees the "name/type" form, so parse_provider's own default for an
+        # untyped provider is never reached.
         self.lp_dex_name, self.lp_trading_type = parse_provider(config.lp_provider)
 
         # Parse token symbols from trading pair

@@ -1,14 +1,20 @@
 """
 Repository for executor database operations.
 """
+import logging
+import math
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import and_, case, desc, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import ExecutorOrder, ExecutorRecord, PositionHoldRecord
+from database.repositories.executor_performance_repository import ExecutorPerformanceRepository
+
+logger = logging.getLogger(__name__)
 
 
 class ExecutorRepository:
@@ -30,9 +36,15 @@ class ExecutorRepository:
             trading_pair: str,
             config: Optional[str] = None,
             status: str = "RUNNING",
-            controller_id: str = "main"
+            controller_id: str = "main",
+            created_at: Optional[datetime] = None
     ) -> ExecutorRecord:
-        """Create a new executor record."""
+        """Create a new executor record.
+
+        `created_at` defaults to the server clock; pass it only when the row is being
+        written after the fact (see upsert_executor_completion) so the record still
+        orders by when the executor actually started.
+        """
         executor = ExecutorRecord(
             executor_id=executor_id,
             executor_type=executor_type,
@@ -43,6 +55,8 @@ class ExecutorRepository:
             config=config,
             status=status
         )
+        if created_at is not None:
+            executor.created_at = created_at
 
         self.session.add(executor)
         await self.session.flush()
@@ -89,6 +103,75 @@ class ExecutorRepository:
             await self.session.refresh(executor)
 
         return executor
+
+    async def upsert_executor_completion(
+            self,
+            executor_id: str,
+            executor_type: str,
+            account_name: str,
+            connector_name: str,
+            trading_pair: str,
+            controller_id: str = "main",
+            config: Optional[str] = None,
+            created_at: Optional[datetime] = None,
+            status: Optional[str] = None,
+            close_type: Optional[str] = None,
+            net_pnl_quote: Optional[Decimal] = None,
+            net_pnl_pct: Optional[Decimal] = None,
+            cum_fees_quote: Optional[Decimal] = None,
+            filled_amount_quote: Optional[Decimal] = None,
+            final_state: Optional[str] = None,
+            error_log: Optional[str] = None
+    ) -> Tuple[Optional[ExecutorRecord], bool]:
+        """Write an executor's final state, creating its row if it is not there yet.
+
+        `update_executor` is select-then-update, so it silently does nothing when the
+        creation INSERT has not landed: an executor that closes milliseconds after
+        start can have its completion written before (or instead of) its creation row,
+        and the final state would just be dropped, leaving a phantom RUNNING executor.
+        This is the same insert-or-update shape `upsert_position_hold` already uses.
+
+        Returns (record, created) where `created` is True if the row had to be
+        repaired — the caller is expected to log that, it is never normal.
+        """
+        completion = dict(
+            status=status,
+            close_type=close_type,
+            net_pnl_quote=net_pnl_quote,
+            net_pnl_pct=net_pnl_pct,
+            cum_fees_quote=cum_fees_quote,
+            filled_amount_quote=filled_amount_quote,
+            final_state=final_state,
+            error_log=error_log,
+        )
+
+        executor = await self.update_executor(executor_id=executor_id, **completion)
+        if executor is not None:
+            return executor, False
+
+        # No row: insert one from the metadata the caller carries. A creation INSERT
+        # racing us in another session can still win between our SELECT and this
+        # INSERT, so do it in a SAVEPOINT and fall back to the update — the outer
+        # transaction stays usable either way.
+        created = True
+        try:
+            async with self.session.begin_nested():
+                await self.create_executor(
+                    executor_id=executor_id,
+                    executor_type=executor_type,
+                    account_name=account_name,
+                    connector_name=connector_name,
+                    trading_pair=trading_pair,
+                    config=config,
+                    status=status or "RUNNING",
+                    controller_id=controller_id,
+                    created_at=created_at,
+                )
+        except IntegrityError:
+            created = False
+
+        executor = await self.update_executor(executor_id=executor_id, **completion)
+        return executor, created
 
     async def get_executor_by_id(self, executor_id: str) -> Optional[ExecutorRecord]:
         """Get an executor by ID."""
@@ -316,58 +399,50 @@ class ExecutorRepository:
         return result.rowcount > 0
 
     async def get_executor_stats(self) -> Dict[str, Any]:
-        """Get statistics about executors."""
-        # Total executors
-        total_stmt = select(func.count(ExecutorRecord.id))
-        total_result = await self.session.execute(total_stmt)
-        total_executors = total_result.scalar() or 0
+        """Get statistics about executors.
 
-        # Active executors
-        active_stmt = select(func.count(ExecutorRecord.id)).where(
-            ExecutorRecord.status == "RUNNING"
+        Two round-trips, not seven: one row of scalar aggregates, and one grouped
+        statement the three per-column breakdowns are pivoted out of in Python. The
+        aggregate shape is the same one `get_performance_report` uses next door.
+        """
+        agg_stmt = select(
+            func.count(ExecutorRecord.id).label("total"),
+            func.coalesce(func.sum(case(
+                (ExecutorRecord.status == "RUNNING", 1),
+                else_=0,
+            )), 0).label("active"),
+            func.coalesce(func.sum(ExecutorRecord.net_pnl_quote), Decimal(0)).label("pnl"),
+            # The volume generated, not the capital deployed.
+            func.coalesce(func.sum(ExecutorRecord.filled_amount_quote), Decimal(0)).label("vol"),
         )
-        active_result = await self.session.execute(active_stmt)
-        active_executors = active_result.scalar() or 0
+        agg_row = (await self.session.execute(agg_stmt)).one()
 
-        # Total PnL
-        pnl_stmt = select(func.sum(ExecutorRecord.net_pnl_quote))
-        pnl_result = await self.session.execute(pnl_stmt)
-        total_pnl = pnl_result.scalar() or Decimal("0")
-
-        # Total volume — the volume generated, not the capital deployed.
-        volume_stmt = select(func.sum(ExecutorRecord.filled_amount_quote))
-        volume_result = await self.session.execute(volume_stmt)
-        total_volume = volume_result.scalar() or Decimal("0")
-
-        # Executors by type
-        type_stmt = select(
+        # One grouped statement carries all three breakdowns. The number of rows it
+        # returns is bounded by the distinct (type, status, connector) combinations --
+        # a handful in practice -- and each breakdown is summed back out of them below.
+        group_stmt = select(
             ExecutorRecord.executor_type,
-            func.count(ExecutorRecord.id).label('count')
-        ).group_by(ExecutorRecord.executor_type)
-        type_result = await self.session.execute(type_stmt)
-        type_counts = {row.executor_type: row.count for row in type_result}
-
-        # Executors by status
-        status_stmt = select(
             ExecutorRecord.status,
-            func.count(ExecutorRecord.id).label('count')
-        ).group_by(ExecutorRecord.status)
-        status_result = await self.session.execute(status_stmt)
-        status_counts = {row.status: row.count for row in status_result}
-
-        # Executors by connector
-        connector_stmt = select(
             ExecutorRecord.connector_name,
-            func.count(ExecutorRecord.id).label('count')
-        ).group_by(ExecutorRecord.connector_name)
-        connector_result = await self.session.execute(connector_stmt)
-        connector_counts = {row.connector_name: row.count for row in connector_result}
+            func.count(ExecutorRecord.id).label("count"),
+        ).group_by(
+            ExecutorRecord.executor_type,
+            ExecutorRecord.status,
+            ExecutorRecord.connector_name,
+        )
+        type_counts: Dict[str, int] = {}
+        status_counts: Dict[str, int] = {}
+        connector_counts: Dict[str, int] = {}
+        for row in await self.session.execute(group_stmt):
+            type_counts[row.executor_type] = type_counts.get(row.executor_type, 0) + row.count
+            status_counts[row.status] = status_counts.get(row.status, 0) + row.count
+            connector_counts[row.connector_name] = connector_counts.get(row.connector_name, 0) + row.count
 
         return {
-            "total_executors": total_executors,
-            "active_executors": active_executors,
-            "total_pnl_quote": float(total_pnl),
-            "total_volume_quote": float(total_volume),
+            "total_executors": agg_row.total or 0,
+            "active_executors": agg_row.active or 0,
+            "total_pnl_quote": float(agg_row.pnl),
+            "total_volume_quote": float(agg_row.vol),
             "type_counts": type_counts,
             "status_counts": status_counts,
             "connector_counts": connector_counts
@@ -380,7 +455,11 @@ class ExecutorRepository:
         """Get a performance report, optionally filtered by controller_id.
 
         Returns aggregate metrics: total executors, PnL, fees, volume,
-        win rate, per-executor PnL list (for Sharpe), and breakdown by type.
+        win rate, PnL dispersion (for Sharpe), and breakdown by type.
+
+        Every metric is an aggregate: the number of rows this returns does not
+        grow with the size of the executors table. It is polled by the
+        `/ws/executors` performance push loop, once per interval per subscriber.
         """
         base_filter = []
         if controller_id:
@@ -408,6 +487,10 @@ class ExecutorRepository:
             func.coalesce(func.sum(ExecutorRecord.cum_fees_quote), Decimal(0)).label("fees"),
             func.coalesce(func.sum(ExecutorRecord.filled_amount_quote), Decimal(0)).label("vol"),
             func.coalesce(func.avg(ExecutorRecord.net_pnl_pct), Decimal(0)).label("pnl_pct_avg"),
+            func.coalesce(
+                func.sum(ExecutorRecord.net_pnl_quote * ExecutorRecord.net_pnl_quote),
+                Decimal(0),
+            ).label("pnl_sq"),
             func.count(ExecutorRecord.id).label("completed_count"),
             func.sum(case(
                 (ExecutorRecord.net_pnl_quote > 0, 1),
@@ -420,12 +503,19 @@ class ExecutorRepository:
         wins = agg_row.wins or 0
         win_rate = (wins / completed_count) if completed_count > 0 else 0.0
 
-        # --- Per-executor PnL list for Sharpe (excluding POSITION_HOLD) ---
-        pnl_list_stmt = select(ExecutorRecord.net_pnl_quote).where(
-            and_(*completed_filter)
-        )
-        pnl_rows = await self.session.execute(pnl_list_stmt)
-        pnl_values = [float(r[0] or 0) for r in pnl_rows]
+        # --- PnL dispersion for Sharpe, from the aggregates rather than the rows ---
+        # Sample standard deviation out of the count, the sum and the sum of squares the
+        # query above already carries. Fetching one net_pnl_quote per completed executor
+        # to do this in Python cost a full table scan on every poll of this report.
+        # NULL PnL counts as zero, as the old per-row list did: SUM skips it, COUNT does not.
+        # The moments stay Decimal until the square root: a large mean with a small spread
+        # loses its whole variance to cancellation if the subtraction is done in float.
+        pnl_std = None
+        if completed_count >= 2:
+            variance = (
+                agg_row.pnl_sq - agg_row.pnl * agg_row.pnl / completed_count
+            ) / (completed_count - 1)
+            pnl_std = math.sqrt(max(float(variance), 0.0))  # max() clamps noise at zero variance
 
         # --- Breakdown by executor type (also excluding POSITION_HOLD to match aggregate totals) ---
         type_stmt = select(
@@ -467,7 +557,8 @@ class ExecutorRepository:
             "fees_total_quote": float(agg_row.fees),
             "volume_total_quote": float(agg_row.vol),
             "win_rate": win_rate,
-            "pnl_values": pnl_values,
+            "completed_count": completed_count,
+            "pnl_std": pnl_std,
             "by_type": by_type,
         }
 
@@ -560,38 +651,105 @@ class ExecutorRepository:
     ) -> int:
         """
         Clean up orphaned executors - those marked as RUNNING but not in active memory.
+
+        Each terminated row takes the metrics of its most recent performance snapshot.
+        A running executor's row carries the zeros it was INSERTed with -- the live
+        figures only exist in ExecutorService memory until it completes -- so terminating
+        it without them booked every executor that was live at a restart at 0 PnL, 0 fees
+        and 0 volume, permanently, and /executors/performance summed those zeros forever.
+        The snapshot series is what makes the real figures recoverable here.
+
+        An executor with no snapshot (created and orphaned inside one snapshot interval)
+        keeps the old behaviour: there is nothing better to write. The adopted figures are
+        the last observed ones rather than the true final ones, which is why the row is
+        still marked SYSTEM_CLEANUP -- a reader can tell an approximated close from a
+        clean one.
+
+        Each reap also writes the terminal snapshot row that the normal completion path
+        writes, in this same transaction. Without it the reap was the one way an executor
+        could reach TERMINATED with no terminal row behind it, and the invariant the
+        /performance routes are built on -- a closed executor's latest row IS its terminal
+        row, answerable with no join back to `executors` -- held for every executor except
+        the ones a crash caught. /performance/latest served their last RUNNING snapshot
+        forever, is_terminal false and close_type null, while /executors/{id} reported
+        TERMINATED/SYSTEM_CLEANUP: two surfaces permanently disagreeing about whether an
+        executor was done.
+
+        The row carries the record's post-adoption figures, so it says exactly what the
+        record says, and its SYSTEM_CLEANUP close_type marks the series end as an
+        approximated close the same way the record does.
+
         Args:
             active_executor_ids: List of executor IDs currently active in memory
             close_type: Close type to set for cleaned up executors
         Returns:
             Number of executors cleaned up
         """
-        from sqlalchemy import update
-
         # Find executors that are RUNNING but not in the active list
         conditions = [ExecutorRecord.status == "RUNNING"]
 
         if active_executor_ids:
             conditions.append(~ExecutorRecord.executor_id.in_(active_executor_ids))
 
-        # First, get the count of orphaned executors for logging
-        count_stmt = select(func.count(ExecutorRecord.id)).where(and_(*conditions))
-        count_result = await self.session.execute(count_stmt)
-        orphaned_count = count_result.scalar() or 0
+        orphaned = (await self.session.execute(
+            select(ExecutorRecord).where(and_(*conditions))
+        )).scalars().all()
 
-        if orphaned_count > 0:
-            # Update orphaned executors to TERMINATED status
-            update_stmt = (
-                update(ExecutorRecord)
-                .where(and_(*conditions))
-                .values(
-                    status="TERMINATED",
-                    close_type=close_type,
-                    closed_at=datetime.now(timezone.utc)
-                )
+        if not orphaned:
+            return 0
+
+        latest_snapshots = await ExecutorPerformanceRepository(self.session).get_latest_for(
+            [record.executor_id for record in orphaned]
+        )
+
+        closed_at = datetime.now(timezone.utc)
+        terminal_rows = []
+        for record in orphaned:
+            record.status = "TERMINATED"
+            record.close_type = close_type
+            record.closed_at = closed_at
+
+            snapshot = latest_snapshots.get(record.executor_id)
+            if snapshot:
+                record.net_pnl_quote = Decimal(str(snapshot["net_pnl_quote"]))
+                record.net_pnl_pct = Decimal(str(snapshot["net_pnl_pct"]))
+                record.cum_fees_quote = Decimal(str(snapshot["cum_fees_quote"]))
+                record.filled_amount_quote = Decimal(str(snapshot["filled_amount_quote"]))
+
+            terminal_rows.append({
+                "executor_id": record.executor_id,
+                # The identity comes from the record, not the snapshot: an executor
+                # orphaned before its first snapshot has no snapshot to read it from, and
+                # these columns are constant across an executor's life either way.
+                "executor_type": record.executor_type or "unknown",
+                "account_name": record.account_name,
+                "connector_name": record.connector_name or "",
+                "trading_pair": record.trading_pair or "",
+                "controller_id": record.controller_id or "main",
+                "status": "TERMINATED",
+                "close_type": close_type,
+                "is_terminal": True,
+                "net_pnl_quote": record.net_pnl_quote,
+                "net_pnl_pct": record.net_pnl_pct,
+                "cum_fees_quote": record.cum_fees_quote,
+                "filled_amount_quote": record.filled_amount_quote,
+                "snapshot_timestamp": closed_at,
+            })
+
+        await self.session.flush()
+
+        # Behind a SAVEPOINT for the same reason _persist_executor_completed's terminal
+        # row is: the reap is the accounting and the snapshot is a point on a chart, so a
+        # failing INSERT here must roll back only itself rather than abort the reap and
+        # leave the whole fleet RUNNING.
+        try:
+            async with self.session.begin_nested():
+                await ExecutorPerformanceRepository(self.session).save_snapshots(terminal_rows)
+        except Exception as e:
+            logger.error(
+                f"Reaped {len(orphaned)} orphaned executors but could not write their "
+                f"terminal performance snapshots; their series end at the last periodic "
+                f"row: {e}"
             )
 
-            await self.session.execute(update_stmt)
-            await self.session.flush()
-
-        return orphaned_count
+        return len(orphaned)

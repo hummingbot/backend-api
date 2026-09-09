@@ -7,7 +7,7 @@ import asyncio
 import json
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from typing import Any, Dict, List, Optional, Type
@@ -32,8 +32,15 @@ from hummingbot.strategy_v2.executors.twap_executor.twap_executor import TWAPExe
 from hummingbot.strategy_v2.executors.xemm_executor.data_types import XEMMExecutorConfig
 from hummingbot.strategy_v2.executors.xemm_executor.xemm_executor import XEMMExecutor
 from hummingbot.strategy_v2.models.executors import CloseType, TrackedOrder
+from sqlalchemy.exc import IntegrityError
 
-from database import AsyncDatabaseManager, ExecutorRepository, GatewayCLMMRepository, GatewaySwapRepository
+from database import (
+    AsyncDatabaseManager,
+    ExecutorPerformanceRepository,
+    ExecutorRepository,
+    GatewayCLMMRepository,
+    GatewaySwapRepository,
+)
 from models.executors import PositionHold
 from services.gateway_client import get_native_gas_token
 from services.trading_service import AccountTradingInterface, TradingService
@@ -116,6 +123,11 @@ class ExecutorService:
     # poller creates it on discovery, which is far slower than the control loop's tick.
     LP_RENT_RETRY_SECONDS = 30.0
 
+    # How often the retention sweep runs, once it is enabled at all. Deleting rows older
+    # than N days does not get more correct for being done every minute, and the sweep is
+    # a DELETE over two tables sharing the control loop's tick.
+    PERFORMANCE_PRUNE_INTERVAL_SECONDS = 3600.0
+
     # Mapping of executor type strings to (executor_class, config_class)
     EXECUTOR_REGISTRY: Dict[str, tuple[Type[ExecutorBase], Type[ExecutorConfigBase]]] = {
         "position_executor": (PositionExecutor, PositionExecutorConfig),
@@ -134,7 +146,9 @@ class ExecutorService:
         db_manager: AsyncDatabaseManager,
         default_account: str = "master_account",
         update_interval: float = 1.0,
-        max_retries: int = 10
+        max_retries: int = 10,
+        performance_snapshot_interval: float = 60.0,
+        performance_retention_days: int = 0
     ):
         """
         Initialize ExecutorService.
@@ -145,12 +159,18 @@ class ExecutorService:
             default_account: Default account to use
             update_interval: Executor update interval in seconds
             max_retries: Maximum retries for executor operations
+            performance_snapshot_interval: How often a live executor's performance is
+                written to executor_performance_snapshots, in seconds
+            performance_retention_days: Delete performance snapshots older than this many
+                days; 0 (the default) keeps everything
         """
         self._trading_service = trading_service
         self.db_manager = db_manager
         self.default_account = default_account
         self.update_interval = update_interval
         self.max_retries = max_retries
+        self.performance_snapshot_interval = performance_snapshot_interval
+        self.performance_retention_days = performance_retention_days
 
         # Trading interfaces per account (lazy initialized via TradingService)
         self._trading_interfaces: Dict[str, AccountTradingInterface] = {}
@@ -181,6 +201,11 @@ class ExecutorService:
         # yet. Discovery runs on its own schedule, so retrying at the control loop's 1 Hz
         # would be a query a second against a row that appears about once a minute.
         self._lp_rent_retry_after: Dict[str, float] = {}
+
+        # Performance snapshot cadence, on the control loop's own clock (monotonic, so a
+        # system clock step cannot stall the series or flood it).
+        self._last_snapshot_at: float = 0.0
+        self._last_prune_at: float = 0.0
 
         # Control loop task
         self._control_loop_task: Optional[asyncio.Task] = None
@@ -338,6 +363,23 @@ class ExecutorService:
                 # Handle completed executors
                 for executor_id in completed_ids:
                     await self._handle_executor_completion(executor_id)
+
+                # Performance snapshots, after completion handling so a just-closed
+                # executor is already out of _active_executors and gets only its terminal
+                # row, not a duplicate periodic one. This is not a separate task on
+                # purpose: the loop already ticks at 1 Hz and already awaits the database
+                # inside the tick (see _record_lp_position_rent), so the cadence is one
+                # guard rather than another thing to schedule and shut down.
+                now = time.monotonic()
+                if now - self._last_snapshot_at >= self.performance_snapshot_interval:
+                    self._last_snapshot_at = now
+                    await self._dump_executor_performance()
+                    if (
+                        self.performance_retention_days > 0
+                        and now - self._last_prune_at >= self.PERFORMANCE_PRUNE_INTERVAL_SECONDS
+                    ):
+                        self._last_prune_at = now
+                        await self._prune_performance_snapshots()
 
             except Exception as e:
                 logger.error(f"Error in executor control loop: {e}", exc_info=True)
@@ -539,6 +581,179 @@ class ExecutorService:
             )
         except Exception as e:
             logger.error(f"Error recording executor swap {transaction_hash}: {e}", exc_info=True)
+
+    # ========================================
+    # Performance Snapshots
+    # ========================================
+
+    def _build_snapshot_row(
+        self,
+        executor_id: str,
+        executor: ExecutorBase,
+        *,
+        is_terminal: bool,
+        metrics: Optional[Dict[str, Any]] = None,
+        status: Optional[str] = None,
+        close_type: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """One executor_performance_snapshots row, from the two sources _format_executor_info reads.
+
+        `metrics`, `status` and `close_type` let the terminal row reuse the figures
+        _persist_executor_completed already computed rather than reading executor_info a
+        second time -- the read that can raise and get silently substituted with zeros.
+
+        Returns None when the metrics cannot be read at all: a row of fabricated zeros in
+        the middle of a series is worse than a gap, because a reader cannot tell it from
+        an executor that genuinely made nothing.
+        """
+        metadata = self._executor_metadata.get(executor_id, {})
+
+        if metrics is None:
+            try:
+                info = executor.executor_info
+                metrics = {
+                    "net_pnl_quote": info.net_pnl_quote,
+                    "net_pnl_pct": info.net_pnl_pct,
+                    "cum_fees_quote": info.cum_fees_quote,
+                    "filled_amount_quote": info.filled_amount_quote,
+                }
+            except Exception as e:
+                logger.debug(f"Could not read executor_info for {executor_id} while snapshotting: {e}")
+                return None
+
+        if status is None:
+            try:
+                status = executor.status.name
+            except Exception as e:
+                logger.debug(f"Could not read status for {executor_id} while snapshotting: {e}")
+                return None
+
+        return {
+            "executor_id": executor_id,
+            "executor_type": metadata.get("executor_type") or "unknown",
+            "account_name": metadata.get("account_name") or self.default_account,
+            "connector_name": metadata.get("connector_name") or "",
+            "trading_pair": metadata.get("trading_pair") or "",
+            "controller_id": metadata.get("controller_id", "main"),
+            "status": status,
+            "close_type": close_type,
+            "is_terminal": is_terminal,
+            **metrics,
+        }
+
+    async def _dump_executor_performance(self):
+        """Write one snapshot row per live executor.
+
+        Only live executors are sampled because _active_executors is, by construction,
+        the only place a running executor's performance exists -- its database row still
+        carries the creation-time zeros until it completes. A closed executor is not
+        missing from here: it got its terminal row at completion.
+
+        Never lets a database failure out: this shares the control loop's tick, and a
+        dropped snapshot must not stop executors from being updated.
+        """
+        if not self.db_manager or not self._active_executors:
+            return
+
+        snapshot_timestamp = datetime.now(timezone.utc)
+        rows = []
+        for executor_id, executor in list(self._active_executors.items()):
+            row = self._build_snapshot_row(executor_id, executor, is_terminal=False)
+            if row is not None:
+                row["snapshot_timestamp"] = snapshot_timestamp
+                rows.append(row)
+
+        if not rows:
+            return
+
+        try:
+            async with self.db_manager.get_session_context() as session:
+                await ExecutorPerformanceRepository(session).save_snapshots(rows)
+            logger.debug(f"Dumped {len(rows)} executor performance snapshots")
+        except Exception as e:
+            logger.error(f"Error saving executor performance snapshots: {e}", exc_info=True)
+
+    async def _prune_performance_snapshots(self):
+        """Delete snapshots older than the configured retention, from both snapshot tables.
+
+        Gated on performance_retention_days > 0 by the caller: the default keeps
+        everything, so an upgrade never starts deleting an operator's history.
+        """
+        if not self.db_manager or self.performance_retention_days <= 0:
+            return
+
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self.performance_retention_days)
+        try:
+            async with self.db_manager.get_session_context() as session:
+                executor_rows, controller_rows = await ExecutorPerformanceRepository(
+                    session
+                ).prune_older_than(cutoff)
+            if executor_rows or controller_rows:
+                logger.info(
+                    f"Pruned performance snapshots older than {cutoff.isoformat()}: "
+                    f"{executor_rows} executor, {controller_rows} controller"
+                )
+        except Exception as e:
+            logger.error(f"Error pruning performance snapshots: {e}", exc_info=True)
+
+    async def get_executor_performance_history(
+        self,
+        executor_id: Optional[str] = None,
+        executor_type: Optional[str] = None,
+        controller_id: Optional[str] = None,
+        account_name: Optional[str] = None,
+        connector_name: Optional[str] = None,
+        trading_pair: Optional[str] = None,
+        limit: Optional[int] = None,
+        cursor: Optional[str] = None,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        interval: str = "5m"
+    ):
+        """Read an executor snapshot series. Mirrors BotsOrchestrator.get_controller_performance_history."""
+        async with self.db_manager.get_session_context() as session:
+            repo = ExecutorPerformanceRepository(
+                session, grain_minutes=self.performance_snapshot_interval / 60.0
+            )
+            return await repo.get_performance_history(
+                executor_id=executor_id,
+                executor_type=executor_type,
+                controller_id=controller_id,
+                account_name=account_name,
+                connector_name=connector_name,
+                trading_pair=trading_pair,
+                limit=limit,
+                cursor=cursor,
+                start_time=start_time,
+                end_time=end_time,
+                interval=interval,
+            )
+
+    async def get_latest_executor_performance(
+        self,
+        executor_id: Optional[str] = None,
+        executor_type: Optional[str] = None,
+        controller_id: Optional[str] = None,
+        account_name: Optional[str] = None,
+        connector_name: Optional[str] = None,
+        trading_pair: Optional[str] = None,
+        limit: Optional[int] = None,
+    ):
+        """The last snapshot of each matching executor. Mirrors
+        BotsOrchestrator.get_latest_controller_performance."""
+        async with self.db_manager.get_session_context() as session:
+            repo = ExecutorPerformanceRepository(
+                session, grain_minutes=self.performance_snapshot_interval / 60.0
+            )
+            return await repo.get_latest(
+                executor_id=executor_id,
+                executor_type=executor_type,
+                controller_id=controller_id,
+                account_name=account_name,
+                connector_name=connector_name,
+                trading_pair=trading_pair,
+                limit=limit,
+            )
 
     def _get_trading_interface(self, account_name: str) -> AccountTradingInterface:
         """Get or create an AccountTradingInterface for the account."""
@@ -1247,8 +1462,6 @@ class ExecutorService:
         Returns:
             Dictionary with performance metrics ready for PerformanceReportResponse.
         """
-        import math
-
         report: Dict[str, Any] = {
             "controller_id": controller_id,
             "total_executors": 0,
@@ -1266,31 +1479,33 @@ class ExecutorService:
         }
 
         if self.db_manager:
-            try:
-                async with self.db_manager.get_session_context() as session:
-                    repo = ExecutorRepository(session)
-                    db_data = await repo.get_performance_report(controller_id=controller_id)
+            # No try/except here on purpose: a database outage used to be swallowed and
+            # reported as the zeroed report below, making it indistinguishable from
+            # "no executors yet" to every consumer -- the route answered 200 with zeroes
+            # and the /ws/executors performance channel pushed a confident row of them.
+            # The failure now propagates: the route turns it into a 500 and the push loop
+            # sends an error frame. The zeroed report is left to mean an empty dataset.
+            async with self.db_manager.get_session_context() as session:
+                repo = ExecutorRepository(session)
+                db_data = await repo.get_performance_report(controller_id=controller_id)
 
-                report["total_executors"] = db_data["total_executors"]
-                report["by_status"] = db_data["status_counts"]
-                report["pnl_total_quote"] = db_data["pnl_total_quote"]
-                report["pnl_pct_avg"] = db_data["pnl_pct_avg"]
-                report["fees_total_quote"] = db_data["fees_total_quote"]
-                report["volume_total_quote"] = db_data["volume_total_quote"]
-                report["win_rate"] = db_data["win_rate"]
-                report["by_type"] = db_data["by_type"]
+            report["total_executors"] = db_data["total_executors"]
+            report["by_status"] = db_data["status_counts"]
+            report["pnl_total_quote"] = db_data["pnl_total_quote"]
+            report["pnl_pct_avg"] = db_data["pnl_pct_avg"]
+            report["fees_total_quote"] = db_data["fees_total_quote"]
+            report["volume_total_quote"] = db_data["volume_total_quote"]
+            report["win_rate"] = db_data["win_rate"]
+            report["by_type"] = db_data["by_type"]
 
-                # Sharpe ratio: mean(pnl) / std(pnl), requires >= 2 values
-                pnl_values = db_data.get("pnl_values", [])
-                if len(pnl_values) >= 2:
-                    mean_pnl = sum(pnl_values) / len(pnl_values)
-                    variance = sum((v - mean_pnl) ** 2 for v in pnl_values) / (len(pnl_values) - 1)
-                    std_pnl = math.sqrt(variance)
-                    if std_pnl > 0:
-                        report["sharpe_ratio"] = round(mean_pnl / std_pnl, 4)
-
-            except Exception as e:
-                logger.error(f"Error generating performance report: {e}", exc_info=True)
+            # Sharpe ratio: mean(pnl) / std(pnl). The repository returns the sample
+            # standard deviation as an aggregate -- None below 2 completed executors --
+            # so this never depends on the number of rows in the table.
+            pnl_std = db_data["pnl_std"]
+            completed_count = db_data["completed_count"]
+            if pnl_std:  # None below 2 executors, 0.0 when every PnL is identical
+                mean_pnl = db_data["pnl_total_quote"] / completed_count
+                report["sharpe_ratio"] = round(mean_pnl / pnl_std, 4)
 
         # --- Unrealized PnL from active executors ---
         unrealized_pnl = 0.0
@@ -1379,6 +1594,14 @@ class ExecutorService:
 
             logger.debug(f"Persisted executor {executor_id} creation to database")
 
+        except IntegrityError:
+            # The executor closed before this INSERT landed and its completion already
+            # wrote the row (see upsert_executor_completion). That row carries the final
+            # state; re-inserting a RUNNING one is exactly what must not happen.
+            logger.debug(
+                f"Executor {executor_id} row already written by its completion; "
+                f"skipping the creation insert"
+            )
         except Exception as e:
             logger.error(f"Error persisting executor creation: {e}")
 
@@ -1399,12 +1622,18 @@ class ExecutorService:
                 net_pnl_pct = executor_info.net_pnl_pct
                 cum_fees_quote = executor_info.cum_fees_quote
                 filled_amount_quote = executor_info.filled_amount_quote
+                metrics_are_measured = True
             except Exception as e:
                 logger.debug(f"Error accessing executor_info for persistence: {e}")
                 net_pnl_quote = Decimal("0")
                 net_pnl_pct = Decimal("0")
                 cum_fees_quote = Decimal("0")
                 filled_amount_quote = Decimal("0")
+                # The record still takes these zeros, as it always has. The snapshot
+                # series does not: a terminal row is what a reader takes for the
+                # executor's final value, and a fabricated zero there is indistinguishable
+                # from an executor that genuinely made nothing.
+                metrics_are_measured = False
 
             # Get custom_info directly from executor to avoid Pydantic serialization issues
             # with TrackedOrder and other complex types
@@ -1465,8 +1694,19 @@ class ExecutorService:
             async with self.db_manager.get_session_context() as session:
                 repo = ExecutorRepository(session)
 
-                await repo.update_executor(
+                # Upsert, not update: an executor that closes in milliseconds can reach
+                # here before _persist_executor_created's INSERT has landed (or after it
+                # failed outright), and a plain select-then-update would silently drop
+                # this final state, leaving a phantom RUNNING executor forever.
+                record, repaired = await repo.upsert_executor_completion(
                     executor_id=executor_id,
+                    executor_type=executor_type,
+                    account_name=metadata.get("account_name"),
+                    connector_name=metadata.get("connector_name"),
+                    trading_pair=metadata.get("trading_pair"),
+                    controller_id=metadata.get("controller_id", "main"),
+                    config=json.dumps(metadata.get("config", {}), default=_json_default),
+                    created_at=metadata.get("created_at"),
                     status=status_name,
                     close_type=close_type,
                     net_pnl_quote=net_pnl_quote,
@@ -1477,7 +1717,54 @@ class ExecutorService:
                     error_log=error_log_json
                 )
 
-            logger.debug(f"Persisted executor {executor_id} completion to database")
+                # The terminal row, in the same transaction as the record update so the
+                # two never disagree. It is what makes a closed executor's series
+                # answerable from executor_performance_snapshots alone -- no join, and no
+                # "and then append the final value" rule for every future reader.
+                #
+                # Behind a SAVEPOINT, because the direction of the coupling matters: the
+                # record update is the accounting and the snapshot is a point on a chart,
+                # so a failing snapshot must roll back only itself. Without it a bad
+                # INSERT here would abort the transaction and lose the completion, which
+                # is the failure 60041a8 went to some trouble to make impossible.
+                if record is not None and metrics_are_measured:
+                    terminal_row = self._build_snapshot_row(
+                        executor_id,
+                        executor,
+                        is_terminal=True,
+                        metrics={
+                            "net_pnl_quote": net_pnl_quote,
+                            "net_pnl_pct": net_pnl_pct,
+                            "cum_fees_quote": cum_fees_quote,
+                            "filled_amount_quote": filled_amount_quote,
+                        },
+                        status=status_name,
+                        close_type=close_type,
+                    )
+                    if terminal_row is not None:
+                        try:
+                            async with session.begin_nested():
+                                await ExecutorPerformanceRepository(session).save_snapshots(
+                                    [terminal_row]
+                                )
+                        except Exception as e:
+                            logger.error(
+                                f"Could not write the terminal performance snapshot for "
+                                f"{executor_id}; its series ends at the last periodic row: {e}"
+                            )
+
+            if record is None:
+                logger.error(
+                    f"Could not persist completion for executor {executor_id}: no row to "
+                    f"update and the repair insert did not take"
+                )
+            elif repaired:
+                logger.warning(
+                    f"Executor {executor_id} completed before its creation row existed; "
+                    f"inserted the record from its final state"
+                )
+            else:
+                logger.debug(f"Persisted executor {executor_id} completion to database")
 
         except Exception as e:
             logger.error(f"Error persisting executor completion: {e}")

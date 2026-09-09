@@ -194,25 +194,20 @@ class WebSocketManager:
                     if new_candle:
                         # New candle row appeared — send full history
                         sub.last_sent_candle_ts = latest_ts
-                        records = df.tail(sub.max_records).to_dict(orient="records")
-                        await self._send_json(websocket, {
-                            "type": "candles",
-                            "subscription_id": sub.subscription_id,
-                            "data": records,
-                            "timestamp": time.time(),
-                        })
+                        msg_type = "candles"
+                        payload = df.tail(sub.max_records).to_dict(orient="records")
                     else:
                         # Live candle update — send only the last candle
-                        last_record = df.iloc[-1].to_dict()
-                        await self._send_json(websocket, {
-                            "type": "candle_update",
-                            "subscription_id": sub.subscription_id,
-                            "data": last_record,
-                            "timestamp": time.time(),
-                        })
-                except (WebSocketDisconnect, RuntimeError):
-                    logger.info(f"WebSocket disconnected, stopping candles push [{sub.subscription_id}]")
-                    break
+                        msg_type = "candle_update"
+                        payload = df.iloc[-1].to_dict()
+                    sent = await self._send_or_stop(websocket, sub, msg_type, {
+                        "type": msg_type,
+                        "subscription_id": sub.subscription_id,
+                        "data": payload,
+                        "timestamp": time.time(),
+                    })
+                    if not sent:
+                        break
                 except Exception as e:
                     logger.error(f"Candles push error [{sub.subscription_id}]: {e}")
         except asyncio.CancelledError:
@@ -237,15 +232,14 @@ class WebSocketManager:
                     bids = snapshot[0].head(sub.depth)[["price", "amount"]].values.tolist()
                     asks = snapshot[1].head(sub.depth)[["price", "amount"]].values.tolist()
 
-                    await self._send_json(websocket, {
+                    sent = await self._send_or_stop(websocket, sub, "order_book", {
                         "type": "order_book",
                         "subscription_id": sub.subscription_id,
                         "data": {"bids": bids, "asks": asks},
                         "timestamp": time.time(),
                     })
-                except (WebSocketDisconnect, RuntimeError):
-                    logger.info(f"WebSocket disconnected, stopping order book push [{sub.subscription_id}]")
-                    break
+                    if not sent:
+                        break
                 except Exception as e:
                     logger.error(f"Order book push error [{sub.subscription_id}]: {e}")
         except asyncio.CancelledError:
@@ -293,15 +287,14 @@ class WebSocketManager:
                     # Drain the buffer
                     trades = sub.trade_buffer[:]
                     sub.trade_buffer.clear()
-                    await self._send_json(websocket, {
+                    sent = await self._send_or_stop(websocket, sub, "trades", {
                         "type": "trades",
                         "subscription_id": sub.subscription_id,
                         "data": trades,
                         "timestamp": time.time(),
                     })
-                except (WebSocketDisconnect, RuntimeError):
-                    logger.info(f"WebSocket disconnected, stopping trades push [{sub.subscription_id}]")
-                    break
+                    if not sent:
+                        break
                 except Exception as e:
                     logger.error(f"Trades push error [{sub.subscription_id}]: {e}")
         except asyncio.CancelledError:
@@ -312,6 +305,23 @@ class WebSocketManager:
     @staticmethod
     async def _send_json(websocket: WebSocket, data: dict):
         await websocket.send_json(data)
+
+    @staticmethod
+    async def _send_or_stop(websocket: WebSocket, sub: Subscription, msg_type: str, message: dict) -> bool:
+        """Push one frame; return False when the client is gone and the loop must stop.
+
+        Only the send is guarded. A RuntimeError raised by a *fetch* is a service
+        fault (connector still initialising, transient upstream error), not a
+        dropped client, so it must stay with the caller's `except Exception`
+        branch, which logs it and retries on the next interval. Mirrors
+        services/executor_ws_manager.py.
+        """
+        try:
+            await websocket.send_json(message)
+            return True
+        except (WebSocketDisconnect, RuntimeError):
+            logger.info(f"WebSocket disconnected, stopping {msg_type} push [{sub.subscription_id}]")
+            return False
 
     @staticmethod
     async def _send_error(websocket: WebSocket, message: str):

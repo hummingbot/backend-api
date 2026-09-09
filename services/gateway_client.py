@@ -1,5 +1,6 @@
 import logging
 import ssl
+import time
 from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
@@ -156,6 +157,13 @@ class GatewayClient:
     Provides essential functionality for wallet management and balance queries.
     """
 
+    # How long a ``ping`` verdict stays reusable. The availability guard
+    # (``deps.require_gateway_online``) runs ahead of every guarded request, so without a cache
+    # each one pays a full round-trip to Gateway. The guard exists to catch "Gateway is down",
+    # not to timestamp the exact moment it went down, so a couple of seconds of staleness is the
+    # right trade — and any call that fails to connect clears the cache anyway (PERF-114).
+    PING_CACHE_TTL_SECONDS = 2.0
+
     def __init__(
         self,
         base_url: str = "http://localhost:15888",
@@ -183,6 +191,8 @@ class GatewayClient:
         self._connector_trading_types: Optional[Dict[str, List[str]]] = None
         # Per-(chain, network) token address -> symbol map, fetched on first use.
         self._token_symbols: Dict[tuple[str, str], Dict[str, str]] = {}
+        # Last ``ping`` verdict as (monotonic expiry, is_online), or None when unknown/invalidated.
+        self._ping_cache: Optional[tuple[float, bool]] = None
 
     @staticmethod
     def parse_network_id(network_id: str) -> tuple[str, str]:
@@ -259,6 +269,7 @@ class GatewayClient:
                 self._certs_unavailable_warned = True
             else:
                 logger.debug(f"Gateway mTLS certs still unavailable, cannot reach {url}: {e}")
+            self._invalidate_ping_cache()
             return {"error": "Gateway client certificates not available; start the Gateway first", "status": 503}
 
         try:
@@ -285,6 +296,9 @@ class GatewayClient:
                     return await response.json()
         except aiohttp.ClientError as e:
             logger.debug(f"Gateway request error: {method} {url} - {e}")
+            # Gateway is unreachable: drop any cached "available" verdict so the next guarded
+            # request re-pings instead of waiting out the TTL on a stale answer.
+            self._invalidate_ping_cache()
             return None
         except Exception as e:
             logger.debug(f"Gateway request failed: {method} {url} - {e}")
@@ -308,13 +322,24 @@ class GatewayClient:
             except Exception:
                 return (f"HTTP {response.status}", None)
 
+    def _invalidate_ping_cache(self) -> None:
+        """Forget the cached availability verdict; the next ``ping`` hits Gateway again."""
+        self._ping_cache = None
+
     async def ping(self) -> bool:
-        """Check if Gateway is online"""
+        """Check if Gateway is online, reusing a verdict at most PING_CACHE_TTL_SECONDS old."""
+        cached = self._ping_cache
+        if cached is not None and time.monotonic() < cached[0]:
+            return cached[1]
         try:
             response = await self._request("GET", "")
-            return response.get("status") == "ok"
+            online = response.get("status") == "ok"
         except Exception:
-            return False
+            online = False
+        # Assigned after the request so the invalidation _request performs on a connection
+        # failure cannot outrun the verdict it caused.
+        self._ping_cache = (time.monotonic() + self.PING_CACHE_TTL_SECONDS, online)
+        return online
 
     async def get_wallets(self) -> List[Dict]:
         """Get all connected wallets"""

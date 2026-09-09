@@ -749,6 +749,89 @@ TAILSCALE_ENABLED=$TAILSCALE_ENABLED
 TAILSCALE_MODE=$TAILSCALE_MODE
 TAILSCALE_AUTH_KEY=$TAILSCALE_AUTH_KEY
 TAILSCALE_HOSTNAME=$TAILSCALE_HOSTNAME
+
+# ---------------------------------------------------------------------------
+# Optional settings. Every line below is commented out and shows the default
+# that config.py already applies -- config.py stays the source of truth, so
+# uncomment a line only to override it.
+# ---------------------------------------------------------------------------
+
+# Performance snapshots
+# How often a live executor's performance is snapshotted, in seconds.
+#PERFORMANCE_EXECUTOR_SNAPSHOT_INTERVAL=60
+# Delete performance snapshots (executor AND controller) older than this many
+# days. 0 keeps everything forever -- raise it to cap database growth.
+#PERFORMANCE_RETENTION_DAYS=0
+
+# Backtesting
+# How many backtests may run at once; further submissions queue. Runs are
+# isolated in separate processes, so this can be raised up to the cores you are
+# willing to give them.
+#BACKTESTING_MAX_CONCURRENT=1
+# Wall-clock budget for one backtest; the worker is killed and the task fails past it.
+#BACKTESTING_TIMEOUT_SECONDS=1800.0
+# How many finished backtests to retain before the oldest are reaped.
+#BACKTESTING_MAX_RESULTS=100
+# Directory holding archived backtest payloads (inside the bots volume, so it
+# survives redeploys).
+#BACKTESTING_RESULTS_PATH=bots/data/backtests
+# Directory holding downloaded candle history shared by backtest workers, so a
+# sweep of configs over one market downloads that market once.
+#BACKTESTING_CANDLES_CACHE_PATH=bots/data/backtests/candles
+# How many downloaded candle ranges to keep; the least recently used are dropped
+# past it. 0 disables the cache and makes every run download its own history.
+#BACKTESTING_CANDLES_CACHE_ENTRIES=32
+# How long a downloaded candle range may be reused. A window ending near now is
+# fetched with its last candle still forming, so an entry is refetched once it is
+# older than this.
+#BACKTESTING_CANDLES_CACHE_TTL_SECONDS=3600.0
+
+# Market data feeds
+# How often to run feed cleanup, in seconds.
+#MARKET_DATA_CLEANUP_INTERVAL=300
+# How long to keep unused feeds alive, in seconds.
+#MARKET_DATA_FEED_TIMEOUT=600
+# How long to wait for a candle feed to become ready, in seconds.
+#MARKET_DATA_CANDLES_READY_TIMEOUT=30
+# WebSocket heartbeat interval, in seconds.
+#MARKET_DATA_WS_HEARTBEAT_INTERVAL=30
+# Allowed range for a market-data WebSocket subscription update interval, in seconds.
+#MARKET_DATA_WS_MIN_UPDATE_INTERVAL=0.25
+#MARKET_DATA_WS_MAX_UPDATE_INTERVAL=60.0
+# Allowed range, and the applied default, for a /ws/executors subscription
+# update interval, in seconds. The floor is stricter than the market-data one
+# because executor push loops hit the database instead of reading in-memory
+# candles and order books.
+#MARKET_DATA_WS_EXECUTOR_MIN_UPDATE_INTERVAL=0.5
+#MARKET_DATA_WS_EXECUTOR_MAX_UPDATE_INTERVAL=60.0
+#MARKET_DATA_WS_EXECUTOR_DEFAULT_UPDATE_INTERVAL=2.0
+# How often to refresh tickers from connected exchanges, in seconds.
+#MARKET_DATA_TICKER_UPDATE_INTERVAL=30
+# Max age of cached tickers before an on-demand request refetches them, in seconds.
+#MARKET_DATA_TICKER_MAX_AGE=60
+# How long a ticker-only connector stays in the background refresh cycle after
+# its last request, in seconds.
+#MARKET_DATA_TICKER_SUBSCRIPTION_TTL=600
+# How often to refresh Hyperliquid HIP-3 (builder-deployed perp dex) tickers, in
+# seconds. Set to 0 to exclude HIP-3 markets.
+#MARKET_DATA_HYPERLIQUID_HIP3_INTERVAL=120
+
+# CORS (SEC-019). A wildcard origin must never be combined with credentials, so
+# trusted origins are restricted to localhost by default.
+# Explicit list of trusted origins, as JSON, e.g. ["https://dashboard.example.com"]
+#CORS_ALLOW_ORIGINS=[]
+# Regex matching trusted origins; an empty string disables regex matching.
+#CORS_ALLOW_ORIGIN_REGEX=https?://(localhost|127\.0\.0\.1)(:\d+)?
+# Allow credentialed (cookies/auth) cross-origin requests.
+#CORS_ALLOW_CREDENTIALS=true
+# HTTP methods and headers allowed for cross-origin requests.
+#CORS_ALLOW_METHODS=["*"]
+#CORS_ALLOW_HEADERS=["*"]
+
+# AWS (only needed for S3 archiving)
+#AWS_API_KEY=
+#AWS_SECRET_KEY=
+#AWS_S3_DEFAULT_BUCKET_NAME=
 EOF
 
 # Appended rather than templated: these are the caller's tuning, not this

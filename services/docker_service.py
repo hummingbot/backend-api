@@ -6,11 +6,12 @@ import time
 from typing import Dict
 
 import docker
-from docker.errors import DockerException
+from docker.errors import DockerException, NotFound
 from docker.types import LogConfig
 
 from config import settings
 from models import V2ControllerDeployment
+from models.bot_orchestration import validate_safe_config_name
 from utils.file_system import fs_util
 from utils.gateway_certs import ensure_gateway_certs, gateway_certs_dir
 
@@ -37,6 +38,20 @@ class DockerService:
         except DockerException as e:
             logger.error(f"It was not possible to connect to Docker. Please make sure Docker is running. Error: {e}")
 
+    @staticmethod
+    def _failure(message: str, error: str = "docker_error") -> Dict:
+        """A failure a route can turn into a status code, without the daemon's internals.
+
+        docker-py's exception strings carry the socket URL and the negotiated API version
+        ("404 Client Error for http+docker://localhost/v1.55/containers/x/json: Not Found
+        ..."), so returning str(e) as the response body both published how this API talks
+        to its daemon and, because these routes returned it with a 200, let a caller that
+        checks the status code -- the normal way to detect failure -- read a container
+        that was never stopped as one that was. The raw error goes to the log; the caller
+        gets the kind of failure, which routers/docker.py maps to a status code.
+        """
+        return {"success": False, "error": error, "message": message}
+
     def get_active_containers(self, name_filter: str = None):
         try:
             all_containers = self.client.containers.list(filters={"status": "running"})
@@ -62,14 +77,16 @@ class DockerService:
                 ]
             return containers_info
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error listing active containers: {e}")
+            return self._failure("Could not list running containers")
 
     def get_available_images(self):
         try:
             images = self.client.images.list()
             return {"images": images}
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error listing images: {e}")
+            return self._failure("Could not list Docker images")
 
     def pull_image(self, image_name):
         try:
@@ -110,13 +127,16 @@ class DockerService:
                 ]
             return containers_info
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error listing exited containers: {e}")
+            return self._failure("Could not list exited containers")
 
     def clean_exited_containers(self):
         try:
             self.client.containers.prune()
+            return {"success": True, "message": "Exited containers removed."}
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error pruning exited containers: {e}")
+            return self._failure("Could not remove exited containers")
 
     def is_docker_running(self):
         try:
@@ -126,18 +146,33 @@ class DockerService:
             return False
 
     def stop_container(self, container_name):
+        """Stop a running container.
+
+        Reports failure in-band rather than raising: stop-and-archive calls this in a
+        retry loop and decides whether it worked by reading the container's status
+        afterwards, so an exception here would abort a workflow that is designed to
+        tolerate a stop that did not take.
+        """
         try:
             container = self.client.containers.get(container_name)
             container.stop()
+            return {"success": True, "message": f"Container {container_name} stopped."}
+        except NotFound:
+            return self._failure(f"No such container: {container_name}", error="not_found")
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error stopping container {container_name}: {e}")
+            return self._failure(f"Could not stop container '{container_name}'")
 
     def start_container(self, container_name):
         try:
             container = self.client.containers.get(container_name)
             container.start()
+            return {"success": True, "message": f"Container {container_name} started."}
+        except NotFound:
+            return self._failure(f"No such container: {container_name}", error="not_found")
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error starting container {container_name}: {e}")
+            return self._failure(f"Could not start container '{container_name}'")
 
     def get_container_status(self, container_name):
         """Get the status of a container"""
@@ -151,16 +186,22 @@ class DockerService:
                     "exit_code": getattr(container.attrs.get("State", {}), "ExitCode", None)
                 }
             }
+        except NotFound:
+            return self._failure(f"No such container: {container_name}", error="not_found")
         except DockerException as e:
-            return {"success": False, "message": str(e)}
+            logger.error(f"Error reading status of container {container_name}: {e}")
+            return self._failure(f"Could not read the status of container '{container_name}'")
 
     def remove_container(self, container_name, force=True):
         try:
             container = self.client.containers.get(container_name)
             container.remove(force=force)
             return {"success": True, "message": f"Container {container_name} removed successfully."}
+        except NotFound:
+            return self._failure(f"No such container: {container_name}", error="not_found")
         except DockerException as e:
-            return {"success": False, "message": str(e)}
+            logger.error(f"Error removing container {container_name}: {e}")
+            return self._failure(f"Could not remove container '{container_name}'")
 
     @staticmethod
     def _ensure_contained(path: str, base_dir: str, label: str):
@@ -173,6 +214,20 @@ class DockerService:
         if os.path.commonpath([resolved_base, resolved_path]) != resolved_base:
             raise ValueError(f"Invalid {label}: '{path}' resolves outside of '{base_dir}'.")
         return resolved_path
+
+    @classmethod
+    def resolve_instance_dir(cls, instance_name: str) -> str:
+        """
+        Resolve the `bots/instances` directory that belongs to `instance_name`.
+
+        Bot containers are named after their instance verbatim, so this directory is also what
+        identifies a container as one this API created. Raises ValueError if the name escapes
+        `bots/instances`.
+        """
+        instances_base = os.path.join("bots", "instances")
+        instance_dir = os.path.join(instances_base, instance_name)
+        cls._ensure_contained(instance_dir, instances_base, "instance_name")
+        return instance_dir
 
     def create_hummingbot_instance(self, config: V2ControllerDeployment):
         bots_path = os.environ.get('BOTS_PATH', self.SOURCE_PATH)  # Default to 'SOURCE_PATH' if BOTS_PATH is not set
@@ -226,10 +281,29 @@ class DockerService:
                         os.makedirs(destination_controllers_config_dir, exist_ok=True)
 
                         for controller_file in controllers_list:
-                            source_controller_file = os.path.join(controllers_config_dir, controller_file)
-                            destination_controller_file = os.path.join(
-                                destination_controllers_config_dir, controller_file
-                            )
+                            # SEC-058: the controllers list is read back from an attacker-controllable
+                            # YAML file, so it never went through the request-body validators. Validate
+                            # each entry as a single safe path component and, as defense in depth,
+                            # verify both resolved paths stay inside their base directories.
+                            try:
+                                if not isinstance(controller_file, str):
+                                    raise ValueError(
+                                        f"Invalid controllers_config entry: {controller_file!r} is not a string."
+                                    )
+                                validate_safe_config_name(controller_file, "controllers_config")
+                                source_controller_file = self._ensure_contained(
+                                    os.path.join(controllers_config_dir, controller_file),
+                                    controllers_config_dir,
+                                    "controllers_config",
+                                )
+                                destination_controller_file = self._ensure_contained(
+                                    os.path.join(destination_controllers_config_dir, controller_file),
+                                    destination_controllers_config_dir,
+                                    "controllers_config",
+                                )
+                            except ValueError as e:
+                                logger.warning(f"Skipping unsafe controller config entry {controller_file!r}: {e}")
+                                continue
 
                             if os.path.exists(source_controller_file):
                                 shutil.copy2(source_controller_file, destination_controller_file)

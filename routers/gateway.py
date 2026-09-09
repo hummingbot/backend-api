@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from deps import get_accounts_service, get_gateway_service
+from deps import get_accounts_service, get_gateway_service, require_gateway_online
 from models import AddPoolRequest, AddTokenRequest, GatewayConfig, GatewayStatus, UpdateApiKeysRequest
 from services.accounts_service import AccountsService
 from services.gateway_client import GatewayError, check_gateway_error
@@ -154,7 +154,7 @@ async def get_gateway_logs(
 # Connectors
 # ============================================
 
-@router.get("/connectors")
+@router.get("/connectors", dependencies=[Depends(require_gateway_online)])
 async def list_connectors(accounts_service: AccountsService = Depends(get_accounts_service)) -> Dict:
     """
     List all available DEX connectors with their configurations.
@@ -163,9 +163,6 @@ async def list_connectors(accounts_service: AccountsService = Depends(get_accoun
     All fields normalized to snake_case.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         result = check_gateway_error(await accounts_service.gateway_client.get_connectors())
         return normalize_gateway_response(result)
 
@@ -177,7 +174,7 @@ async def list_connectors(accounts_service: AccountsService = Depends(get_accoun
         raise HTTPException(status_code=500, detail=f"Error listing connectors: {str(e)}")
 
 
-@router.get("/connectors/{connector_name}")
+@router.get("/connectors/{connector_name}", dependencies=[Depends(require_gateway_online)])
 async def get_connector_config(
     connector_name: str,
     accounts_service: AccountsService = Depends(get_accounts_service)
@@ -189,9 +186,6 @@ async def get_connector_config(
         connector_name: Connector name (e.g., 'meteora', 'raydium')
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         result = check_gateway_error(await accounts_service.gateway_client.get_config(connector_name))
         return normalize_gateway_response(result)
 
@@ -203,7 +197,7 @@ async def get_connector_config(
         raise HTTPException(status_code=500, detail=f"Error getting connector config: {str(e)}")
 
 
-@router.post("/connectors/{connector_name}")
+@router.post("/connectors/{connector_name}", dependencies=[Depends(require_gateway_online)])
 async def update_connector_config(
     connector_name: str,
     config_updates: Dict,
@@ -219,9 +213,6 @@ async def update_connector_config(
                        or camelCase (e.g., {"slippagePct": 0.5})
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         results = []
         for path, value in config_updates.items():
             # Convert snake_case to camelCase if needed
@@ -251,7 +242,7 @@ async def update_connector_config(
 # API Keys
 # ============================================
 
-@router.get("/apiKeys")
+@router.get("/apiKeys", dependencies=[Depends(require_gateway_online)])
 async def get_api_keys(accounts_service: AccountsService = Depends(get_accounts_service)) -> Dict:
     """
     Get all configured API keys from Gateway.
@@ -266,9 +257,6 @@ async def get_api_keys(accounts_service: AccountsService = Depends(get_accounts_
     }
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         return check_gateway_error(await accounts_service.gateway_client.get_api_keys())
 
     except HTTPException:
@@ -279,7 +267,7 @@ async def get_api_keys(accounts_service: AccountsService = Depends(get_accounts_
         raise HTTPException(status_code=500, detail=f"Error getting API keys: {str(e)}")
 
 
-@router.post("/apiKeys")
+@router.post("/apiKeys", dependencies=[Depends(require_gateway_online)])
 async def update_api_keys(
     request: UpdateApiKeysRequest,
     accounts_service: AccountsService = Depends(get_accounts_service)
@@ -301,9 +289,6 @@ async def update_api_keys(
     Note: After updating API keys, restart Gateway for changes to take effect.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         results = await accounts_service.gateway_client.update_api_keys(request.api_keys)
 
         # A None result means the request never reached Gateway (connection
@@ -335,7 +320,7 @@ async def update_api_keys(
 # Chains (Networks) and Tokens
 # ============================================
 
-@router.get("/chains")
+@router.get("/chains", dependencies=[Depends(require_gateway_online)])
 async def list_chains(accounts_service: AccountsService = Depends(get_accounts_service)) -> Dict:
     """
     List all available blockchain chains and their networks.
@@ -343,9 +328,6 @@ async def list_chains(accounts_service: AccountsService = Depends(get_accounts_s
     This also serves as the networks list endpoint.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         return check_gateway_error(await accounts_service.gateway_client.get_chains())
 
     except HTTPException:
@@ -360,7 +342,7 @@ async def list_chains(accounts_service: AccountsService = Depends(get_accounts_s
 # Pools (Legacy - use /networks/{network_id}/pools instead)
 # ============================================
 
-@router.get("/pools", deprecated=True)
+@router.get("/pools", deprecated=True, dependencies=[Depends(require_gateway_online)])
 async def list_pools_legacy(
     connector_name: str = Query(description="DEX connector (e.g., 'meteora', 'raydium')"),
     network: str = Query(description="Network (e.g., 'mainnet-beta')"),
@@ -372,9 +354,6 @@ async def list_pools_legacy(
     List all liquidity pools for a connector and network.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Determine chain from connector (legacy behavior). Solana routers
         # (jupiter/dflow/okx/titan) must map to solana too, or this returns the
         # (empty) ethereum pool list for them.
@@ -404,7 +383,7 @@ async def list_pools_legacy(
 # Networks (Primary Endpoints)
 # ============================================
 
-@router.get("/networks")
+@router.get("/networks", dependencies=[Depends(require_gateway_online)])
 async def list_networks(accounts_service: AccountsService = Depends(get_accounts_service)) -> Dict:
     """
     List all available networks across all chains.
@@ -413,9 +392,6 @@ async def list_networks(accounts_service: AccountsService = Depends(get_accounts
     This is the primary interface for network discovery.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         chains_result = check_gateway_error(await accounts_service.gateway_client.get_chains())
 
         # Flatten chain-network combinations into network IDs
@@ -445,7 +421,7 @@ async def list_networks(accounts_service: AccountsService = Depends(get_accounts
         raise HTTPException(status_code=500, detail=f"Error listing networks: {str(e)}")
 
 
-@router.get("/networks/{network_id}")
+@router.get("/networks/{network_id}", dependencies=[Depends(require_gateway_online)])
 async def get_network_config(
     network_id: str,
     accounts_service: AccountsService = Depends(get_accounts_service)
@@ -459,9 +435,6 @@ async def get_network_config(
     Example: GET /gateway/networks/solana-mainnet-beta
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         result = check_gateway_error(await accounts_service.gateway_client.get_config(network_id))
         return normalize_gateway_response(result)
 
@@ -473,7 +446,7 @@ async def get_network_config(
         raise HTTPException(status_code=500, detail=f"Error getting network config: {str(e)}")
 
 
-@router.post("/networks/{network_id}")
+@router.post("/networks/{network_id}", dependencies=[Depends(require_gateway_online)])
 async def update_network_config(
     network_id: str,
     config_updates: Dict,
@@ -491,9 +464,6 @@ async def update_network_config(
     Example: POST /gateway/networks/solana-mainnet-beta
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         results = []
         for path, value in config_updates.items():
             # Convert snake_case to camelCase if needed
@@ -519,7 +489,7 @@ async def update_network_config(
         raise HTTPException(status_code=500, detail=f"Error updating network config: {str(e)}")
 
 
-@router.get("/networks/{network_id}/tokens")
+@router.get("/networks/{network_id}/tokens", dependencies=[Depends(require_gateway_online)])
 async def get_network_tokens(
     network_id: str,
     search: Optional[str] = Query(default=None),
@@ -535,9 +505,6 @@ async def get_network_tokens(
     Example: GET /gateway/networks/solana-mainnet-beta/tokens?search=USDC
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id into chain and network
         parts = network_id.split('-', 1)
         if len(parts) != 2:
@@ -572,7 +539,7 @@ async def get_network_tokens(
         raise HTTPException(status_code=500, detail=f"Error getting network tokens: {str(e)}")
 
 
-@router.post("/networks/{network_id}/tokens")
+@router.post("/networks/{network_id}/tokens", dependencies=[Depends(require_gateway_online)])
 async def add_network_token(
     network_id: str,
     token_request: AddTokenRequest,
@@ -597,9 +564,6 @@ async def add_network_token(
     the token is live as soon as this returns.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id into chain and network
         parts = network_id.split('-', 1)
         if len(parts) != 2:
@@ -637,7 +601,7 @@ async def add_network_token(
         raise HTTPException(status_code=500, detail=f"Error adding token: {str(e)}")
 
 
-@router.post("/networks/{network_id}/tokens/save/{token_address}")
+@router.post("/networks/{network_id}/tokens/save/{token_address}", dependencies=[Depends(require_gateway_online)])
 async def save_network_token(
     network_id: str,
     token_address: str,
@@ -656,9 +620,6 @@ async def save_network_token(
     Example: POST /gateway/networks/solana-mainnet-beta/tokens/save/9QFfgxdSqH5zT7j6rZb1y6SZhw2aFtcQu2r6BuYpump
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id into chain and network
         parts = network_id.split('-', 1)
         if len(parts) != 2:
@@ -693,7 +654,7 @@ async def save_network_token(
         raise HTTPException(status_code=500, detail=f"Error saving token: {str(e)}")
 
 
-@router.delete("/networks/{network_id}/tokens/{token_address}")
+@router.delete("/networks/{network_id}/tokens/{token_address}", dependencies=[Depends(require_gateway_online)])
 async def delete_network_token(
     network_id: str,
     token_address: str,
@@ -712,9 +673,6 @@ async def delete_network_token(
     the deletion is live as soon as this returns.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id into chain and network
         parts = network_id.split('-', 1)
         if len(parts) != 2:
@@ -747,7 +705,7 @@ async def delete_network_token(
 # Network Pools
 # ============================================
 
-@router.get("/networks/{network_id}/pools")
+@router.get("/networks/{network_id}/pools", dependencies=[Depends(require_gateway_online)])
 async def get_network_pools(
     network_id: str,
     connector: Optional[str] = Query(default=None, description="Filter by connector (e.g., 'raydium', 'meteora')"),
@@ -767,9 +725,6 @@ async def get_network_pools(
     Example: GET /gateway/networks/solana-mainnet-beta/pools?connector=raydium&type=clmm
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id into chain and network
         parts = network_id.split('-', 1)
         if len(parts) != 2:
@@ -801,7 +756,7 @@ async def get_network_pools(
         raise HTTPException(status_code=500, detail=f"Error getting network pools: {str(e)}")
 
 
-@router.post("/networks/{network_id}/pools")
+@router.post("/networks/{network_id}/pools", dependencies=[Depends(require_gateway_online)])
 async def add_network_pool(
     network_id: str,
     pool_request: AddPoolRequest,
@@ -830,9 +785,6 @@ async def add_network_pool(
     pool is listed and priced as soon as this returns.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id into chain and network
         parts = network_id.split('-', 1)
         if len(parts) != 2:
@@ -879,7 +831,7 @@ async def add_network_pool(
         raise HTTPException(status_code=500, detail=f"Error adding pool: {str(e)}")
 
 
-@router.post("/networks/{network_id}/pools/save/{pool_address}")
+@router.post("/networks/{network_id}/pools/save/{pool_address}", dependencies=[Depends(require_gateway_online)])
 async def save_network_pool(
     network_id: str,
     pool_address: str,
@@ -906,9 +858,6 @@ async def save_network_pool(
     Example: POST /gateway/networks/solana-mainnet-beta/pools/save/2sf5NYcY...?connector=meteora&type=clmm
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         if (connector is None) != (type is None):
             raise HTTPException(
                 status_code=400,
@@ -947,7 +896,7 @@ async def save_network_pool(
         raise HTTPException(status_code=500, detail=f"Error saving pool: {str(e)}")
 
 
-@router.delete("/networks/{network_id}/pools/{pool_address}")
+@router.delete("/networks/{network_id}/pools/{pool_address}", dependencies=[Depends(require_gateway_online)])
 async def delete_network_pool(
     network_id: str,
     pool_address: str,
@@ -966,9 +915,6 @@ async def delete_network_pool(
     deletion is live as soon as this returns.
     """
     try:
-        if not await accounts_service.gateway_client.ping():
-            raise HTTPException(status_code=503, detail="Gateway service is not available")
-
         # Parse network_id into chain and network
         parts = network_id.split('-', 1)
         if len(parts) != 2:

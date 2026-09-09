@@ -55,6 +55,22 @@ class MarketDataSettings(BaseSettings):
         default=60.0,
         description="Maximum allowed WebSocket subscription update interval in seconds"
     )
+    ws_executor_min_update_interval: float = Field(
+        default=0.5,
+        description="Minimum allowed /ws/executors subscription update interval in seconds. "
+                    "The floor is stricter than the market-data one because executor push loops "
+                    "hit the database (executors, performance reports, positions with per-position "
+                    "rate lookups) instead of reading in-memory candles and order books"
+    )
+    ws_executor_max_update_interval: float = Field(
+        default=60.0,
+        description="Maximum allowed /ws/executors subscription update interval in seconds"
+    )
+    ws_executor_default_update_interval: float = Field(
+        default=2.0,
+        description="Update interval applied to a /ws/executors subscription that does not "
+                    "request one, in seconds"
+    )
     ticker_update_interval: int = Field(
         default=30,
         description="How often to refresh tickers from connected exchanges in seconds"
@@ -211,13 +227,28 @@ class AppSettings(BaseSettings):
 
 
 class BacktestingSettings(BaseSettings):
-    """Backtest result retention.
+    """Backtest execution limits and result retention.
 
     A finished backtest is ~98% bulk arrays (processed_data, pnl_timeseries) and only a
     few KB of metrics, so full payloads are archived to disk and only metrics stay
     resident. Retention is therefore a count of results, not a memory budget.
+
+    A run executes in its own worker process and saturates a core for its whole duration,
+    so the two execution limits are about the box, not about memory: how many cores runs
+    may claim at once, and how long one is allowed to claim one before being abandoned.
     """
 
+    max_concurrent: int = Field(
+        default=1,
+        description=(
+            "How many backtests may run at once; further submissions queue. Runs are isolated "
+            "in separate processes, so this can be raised up to the cores you are willing to give them"
+        )
+    )
+    timeout_seconds: float = Field(
+        default=1800.0,
+        description="Wall-clock budget for one backtest; the worker is killed and the task fails past it"
+    )
     max_results: int = Field(
         default=100,
         description="How many finished backtests to retain before the oldest are reaped"
@@ -226,8 +257,46 @@ class BacktestingSettings(BaseSettings):
         default="bots/data/backtests",
         description="Directory holding archived backtest payloads (inside the bots volume, so it survives redeploys)"
     )
+    candles_cache_path: str = Field(
+        default="bots/data/backtests/candles",
+        description="Directory holding downloaded candle history shared by backtest workers"
+    )
+    candles_cache_entries: int = Field(
+        default=32,
+        description=(
+            "How many downloaded candle ranges to keep; the least recently used are dropped past it. "
+            "0 disables the cache and makes every run download its own history again"
+        )
+    )
+    candles_cache_ttl_seconds: float = Field(
+        default=3600.0,
+        description=(
+            "How long a downloaded candle range may be reused. A window ending near now is fetched "
+            "with its last candle still forming, so an entry is refetched once it is older than this"
+        )
+    )
 
     model_config = SettingsConfigDict(env_prefix="BACKTESTING_", extra="ignore")
+
+
+class PerformanceSettings(BaseSettings):
+    """Performance snapshot cadence and retention."""
+
+    executor_snapshot_interval: int = Field(
+        default=60,
+        description="How often a live executor's performance is snapshotted, in seconds. "
+                    "Finer than the controller dump because executors are short-lived: at "
+                    "a 5-minute grain a three-minute position executor gets one point."
+    )
+    retention_days: int = Field(
+        default=0,
+        description="Delete performance snapshots (executor AND controller) older than "
+                    "this many days. 0 keeps everything forever, which is what every "
+                    "existing deployment does today -- an upgrade must not start deleting "
+                    "an operator's history."
+    )
+
+    model_config = SettingsConfigDict(env_prefix="PERFORMANCE_", extra="ignore")
 
 
 class Settings(BaseSettings):
@@ -242,6 +311,7 @@ class Settings(BaseSettings):
     cors: CORSSettings = Field(default_factory=CORSSettings)
     app: AppSettings = Field(default_factory=AppSettings)
     backtesting: BacktestingSettings = Field(default_factory=BacktestingSettings)
+    performance: PerformanceSettings = Field(default_factory=PerformanceSettings)
 
     # Direct banned_tokens field to handle env parsing
     banned_tokens: List[str] = Field(
