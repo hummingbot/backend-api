@@ -9,6 +9,32 @@ from utils.bot_archiver import BotArchiver
 
 router = APIRouter(tags=["Docker"], prefix="/docker")
 
+# What a DockerService failure means over HTTP. The service reports the kind of failure
+# rather than raising, because its internal callers (stop-and-archive's retry loop) are
+# built to carry on past one; translating it is the HTTP layer's job.
+_STATUS_BY_ERROR = {
+    "not_found": 404,
+    "docker_error": 502,
+}
+
+
+def _or_http_error(result):
+    """Turn a DockerService failure into a status code instead of a 200 with an error body.
+
+    These routes used to return the service's error verbatim, so a container that does
+    not exist answered 200 with a raw docker-py string -- a caller checking the status
+    code, which is how a caller checks, read it as a container that had been stopped.
+
+    Only a dict carrying `success: False` is a failure; a listing route's list and a
+    payload like {"images": [...]} pass through untouched.
+    """
+    if isinstance(result, dict) and result.get("success") is False:
+        raise HTTPException(
+            status_code=_STATUS_BY_ERROR.get(result.get("error"), 502),
+            detail=result.get("message", "Docker operation failed"),
+        )
+    return result
+
 
 @router.get("/running")
 async def is_docker_running(docker_service: DockerService = Depends(get_docker_service)):
@@ -35,8 +61,11 @@ async def available_images(image_name: str = None, docker_service: DockerService
 
     Returns:
         Dictionary with list of available image tags
+
+    Raises:
+        HTTPException: 502 if the Docker daemon refused or could not be reached
     """
-    available_images = docker_service.get_available_images()
+    available_images = _or_http_error(docker_service.get_available_images())
     if image_name:
         return [tag for image in available_images["images"] for tag in image.tags if image_name in tag]
     return [tag for tag in available_images["images"]]
@@ -53,8 +82,11 @@ async def active_containers(name_filter: str = None, docker_service: DockerServi
 
     Returns:
         List of active container information
+
+    Raises:
+        HTTPException: 502 if the Docker daemon refused or could not be reached
     """
-    return docker_service.get_active_containers(name_filter)
+    return _or_http_error(docker_service.get_active_containers(name_filter))
 
 
 @router.get("/exited-containers")
@@ -68,8 +100,11 @@ async def exited_containers(name_filter: str = None, docker_service: DockerServi
 
     Returns:
         List of exited container information
+
+    Raises:
+        HTTPException: 502 if the Docker daemon refused or could not be reached
     """
-    return docker_service.get_exited_containers(name_filter)
+    return _or_http_error(docker_service.get_exited_containers(name_filter))
 
 
 @router.post("/clean-exited-containers")
@@ -81,9 +116,12 @@ async def clean_exited_containers(docker_service: DockerService = Depends(get_do
         docker_service: Docker service dependency
 
     Returns:
-        Response from cleanup operation
+        {"success": true, "message": ...} once the exited containers are pruned
+
+    Raises:
+        HTTPException: 502 if the Docker daemon refused or could not be reached
     """
-    return docker_service.clean_exited_containers()
+    return _or_http_error(docker_service.clean_exited_containers())
 
 
 @router.post("/remove-container/{container_name}")
@@ -129,6 +167,11 @@ async def remove_container(
         )
 
     # Remove the container
+    # Deliberately not mapped to a status code the way stop/start are: this route also
+    # archives, and a container that is already gone is a bot whose data still needs
+    # archiving -- a removal that finds nothing to remove has reached the end state the
+    # caller asked for. The response carries `success` for a caller that wants to know
+    # which of the two happened.
     response = docker_service.remove_container(container_name)
     try:
         # Archive the data
@@ -152,9 +195,13 @@ async def stop_container(container_name: str, docker_service: DockerService = De
         docker_service: Docker service dependency
 
     Returns:
-        Response from container stop operation
+        {"success": true, "message": ...} once the container is stopped
+
+    Raises:
+        HTTPException: 404 if no container by that name exists
+        HTTPException: 502 if the Docker daemon refused or could not be reached
     """
-    return docker_service.stop_container(container_name)
+    return _or_http_error(docker_service.stop_container(container_name))
 
 
 @router.post("/start-container/{container_name}")
@@ -167,9 +214,13 @@ async def start_container(container_name: str, docker_service: DockerService = D
         docker_service: Docker service dependency
 
     Returns:
-        Response from container start operation
+        {"success": true, "message": ...} once the container is started
+
+    Raises:
+        HTTPException: 404 if no container by that name exists
+        HTTPException: 502 if the Docker daemon refused or could not be reached
     """
-    return docker_service.start_container(container_name)
+    return _or_http_error(docker_service.start_container(container_name))
 
 
 @router.post("/pull-image/")

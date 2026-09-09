@@ -6,7 +6,7 @@ import time
 from typing import Dict
 
 import docker
-from docker.errors import DockerException
+from docker.errors import DockerException, NotFound
 from docker.types import LogConfig
 
 from config import settings
@@ -38,6 +38,20 @@ class DockerService:
         except DockerException as e:
             logger.error(f"It was not possible to connect to Docker. Please make sure Docker is running. Error: {e}")
 
+    @staticmethod
+    def _failure(message: str, error: str = "docker_error") -> Dict:
+        """A failure a route can turn into a status code, without the daemon's internals.
+
+        docker-py's exception strings carry the socket URL and the negotiated API version
+        ("404 Client Error for http+docker://localhost/v1.55/containers/x/json: Not Found
+        ..."), so returning str(e) as the response body both published how this API talks
+        to its daemon and, because these routes returned it with a 200, let a caller that
+        checks the status code -- the normal way to detect failure -- read a container
+        that was never stopped as one that was. The raw error goes to the log; the caller
+        gets the kind of failure, which routers/docker.py maps to a status code.
+        """
+        return {"success": False, "error": error, "message": message}
+
     def get_active_containers(self, name_filter: str = None):
         try:
             all_containers = self.client.containers.list(filters={"status": "running"})
@@ -63,14 +77,16 @@ class DockerService:
                 ]
             return containers_info
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error listing active containers: {e}")
+            return self._failure("Could not list running containers")
 
     def get_available_images(self):
         try:
             images = self.client.images.list()
             return {"images": images}
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error listing images: {e}")
+            return self._failure("Could not list Docker images")
 
     def pull_image(self, image_name):
         try:
@@ -111,13 +127,16 @@ class DockerService:
                 ]
             return containers_info
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error listing exited containers: {e}")
+            return self._failure("Could not list exited containers")
 
     def clean_exited_containers(self):
         try:
             self.client.containers.prune()
+            return {"success": True, "message": "Exited containers removed."}
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error pruning exited containers: {e}")
+            return self._failure("Could not remove exited containers")
 
     def is_docker_running(self):
         try:
@@ -127,18 +146,33 @@ class DockerService:
             return False
 
     def stop_container(self, container_name):
+        """Stop a running container.
+
+        Reports failure in-band rather than raising: stop-and-archive calls this in a
+        retry loop and decides whether it worked by reading the container's status
+        afterwards, so an exception here would abort a workflow that is designed to
+        tolerate a stop that did not take.
+        """
         try:
             container = self.client.containers.get(container_name)
             container.stop()
+            return {"success": True, "message": f"Container {container_name} stopped."}
+        except NotFound:
+            return self._failure(f"No such container: {container_name}", error="not_found")
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error stopping container {container_name}: {e}")
+            return self._failure(f"Could not stop container '{container_name}'")
 
     def start_container(self, container_name):
         try:
             container = self.client.containers.get(container_name)
             container.start()
+            return {"success": True, "message": f"Container {container_name} started."}
+        except NotFound:
+            return self._failure(f"No such container: {container_name}", error="not_found")
         except DockerException as e:
-            return str(e)
+            logger.error(f"Error starting container {container_name}: {e}")
+            return self._failure(f"Could not start container '{container_name}'")
 
     def get_container_status(self, container_name):
         """Get the status of a container"""
@@ -152,16 +186,22 @@ class DockerService:
                     "exit_code": getattr(container.attrs.get("State", {}), "ExitCode", None)
                 }
             }
+        except NotFound:
+            return self._failure(f"No such container: {container_name}", error="not_found")
         except DockerException as e:
-            return {"success": False, "message": str(e)}
+            logger.error(f"Error reading status of container {container_name}: {e}")
+            return self._failure(f"Could not read the status of container '{container_name}'")
 
     def remove_container(self, container_name, force=True):
         try:
             container = self.client.containers.get(container_name)
             container.remove(force=force)
             return {"success": True, "message": f"Container {container_name} removed successfully."}
+        except NotFound:
+            return self._failure(f"No such container: {container_name}", error="not_found")
         except DockerException as e:
-            return {"success": False, "message": str(e)}
+            logger.error(f"Error removing container {container_name}: {e}")
+            return self._failure(f"Could not remove container '{container_name}'")
 
     @staticmethod
     def _ensure_contained(path: str, base_dir: str, label: str):
