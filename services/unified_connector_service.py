@@ -27,6 +27,7 @@ from hummingbot.connector.perpetual_derivative_py_base import PerpetualDerivativ
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, TradeType
 from hummingbot.core.data_type.in_flight_order import InFlightOrder, OrderState
 from hummingbot.core.utils.async_utils import safe_ensure_future
+from pydantic import SecretStr
 
 from utils.file_system import fs_util
 from utils.hummingbot_api_config_adapter import HummingbotAPIConfigAdapter
@@ -776,11 +777,7 @@ class UnifiedConnectorService:
                 ClientConfigAdapter(connector_config)
             )
         elif connector_config is not None:
-            api_keys = {
-                key: ""
-                for key in connector_config.__class__.model_fields.keys()
-                if key != "connector"
-            }
+            api_keys = self._public_config_values(connector_config)
         else:
             api_keys = {}
 
@@ -795,6 +792,34 @@ class UnifiedConnectorService:
 
         logger.info(f"Created data connector: {connector_name}")
         return connector
+
+    @staticmethod
+    def _public_config_values(connector_config) -> Dict[str, Any]:
+        """Config values for a keyless data connector: credentials blanked, the rest kept.
+
+        Only credentials have to be withheld here. Everything else in a connector's config
+        map is plain configuration that the connector needs in order to describe the market
+        correctly, and it already carries a sane default from the config class.
+
+        Blanking those too (the previous behaviour) silently degraded connectors that read
+        structured config: xrpl's ``custom_markets`` (``Dict[str, XRPLMarket]``) became
+        ``""``, which its constructor turns into ``{}`` via ``custom_markets or {}``, so
+        every market defined there disappeared and public price lookups for them failed
+        with "Market <PAIR> not found in markets list". Kraken's ``kraken_api_tier`` lost
+        its "Starter" default the same way.
+
+        Required fields stay blanked: they have no default to fall back on, and in practice
+        a required connector field is a credential.
+        """
+        values: Dict[str, Any] = {}
+        for key, field in connector_config.__class__.model_fields.items():
+            if key == "connector":
+                continue
+            if field.annotation is SecretStr or field.is_required():
+                values[key] = ""
+            else:
+                values[key] = getattr(connector_config, key, "")
+        return values
 
     # =========================================================================
     # Network and State Management
@@ -1404,6 +1429,11 @@ class UnifiedConnectorService:
             if allowed_values is not None:
                 field_info["allowed_values"] = allowed_values
 
+            value_shape = UnifiedConnectorService._dict_value_shape(field_type)
+            if value_shape is not None:
+                field_info["type"] = "Dict"
+                field_info["value_shape"] = value_shape
+
             prompt = UnifiedConnectorService._resolve_field_prompt(
                 field, connector_config.hb_config
             )
@@ -1413,6 +1443,48 @@ class UnifiedConnectorService:
             fields_info[key] = field_info
 
         return fields_info
+
+    @staticmethod
+    def _type_label(annotation) -> str:
+        """A readable name for an annotation, unwrapping Optional[...]."""
+        from typing import get_args, get_origin
+
+        args = get_args(annotation)
+        if get_origin(annotation) is not None and type(None) in args:
+            inner = [arg for arg in args if arg is not type(None)]
+            if len(inner) == 1:
+                return f"Optional[{UnifiedConnectorService._type_label(inner[0])}]"
+        return getattr(annotation, "__name__", str(annotation))
+
+    @staticmethod
+    def _dict_value_shape(field_type) -> Optional[Dict[str, str]]:
+        """Field names and types of the model a ``Dict[str, SomeModel]`` field maps to.
+
+        Without this, such a field is reported to clients as the bare repr of its
+        annotation — ``"typing.Dict[str, hummingbot.connector.exchange.xrpl.xrpl_utils.
+        XRPLMarket]"`` for xrpl's ``custom_markets`` — which says nothing about the object
+        a caller is expected to send, so a client cannot build a form for it without
+        hardcoding per-connector knowledge.
+
+        Returns None for anything that is not a dict of models, leaving those fields
+        described exactly as before.
+        """
+        from typing import get_args, get_origin
+
+        from pydantic import BaseModel
+
+        if get_origin(field_type) is not dict:
+            return None
+        args = get_args(field_type)
+        if len(args) != 2:
+            return None
+        value_type = args[1]
+        if not (isinstance(value_type, type) and issubclass(value_type, BaseModel)):
+            return None
+        return {
+            name: UnifiedConnectorService._type_label(sub_field.annotation)
+            for name, sub_field in value_type.model_fields.items()
+        }
 
     @staticmethod
     def _resolve_field_prompt(field, config_map) -> Optional[str]:

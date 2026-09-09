@@ -70,6 +70,7 @@ class PriceRequest(BaseModel):
     """Request model for getting prices"""
     connector_name: str = Field(description="Name of the connector")
     trading_pairs: List[str] = Field(description="List of trading pairs to get prices for")
+    account_name: Optional[str] = Field(default=None, description="Optional account name for trading connector preference")
 
 
 class PriceData(BaseModel):
@@ -90,6 +91,7 @@ class FundingInfoRequest(BaseModel):
     """Request model for getting funding info"""
     connector_name: str = Field(description="Name of the connector")
     trading_pair: str = Field(description="Trading pair to get funding info for")
+    account_name: Optional[str] = Field(default=None, description="Optional account name for trading connector preference")
 
 
 class FundingInfoResponse(BaseModel):
@@ -106,6 +108,7 @@ class OrderBookRequest(BaseModel):
     connector_name: str = Field(description="Name of the connector")
     trading_pair: str = Field(description="Trading pair")
     depth: int = Field(default=10, ge=1, le=1000, description="Number of price levels to return")
+    account_name: Optional[str] = Field(default=None, description="Optional account name for trading connector preference")
 
 
 class OrderBookLevel(BaseModel):
@@ -127,6 +130,7 @@ class OrderBookQueryRequest(BaseModel):
     connector_name: str = Field(description="Name of the connector")
     trading_pair: str = Field(description="Trading pair")
     is_buy: bool = Field(description="True for buy side, False for sell side")
+    account_name: Optional[str] = Field(default=None, description="Optional account name for trading connector preference")
 
 
 class VolumeForPriceRequest(OrderBookQueryRequest):

@@ -262,7 +262,8 @@ async def get_prices(
     try:
         prices = await market_data_manager.get_prices(
             request.connector_name,
-            request.trading_pairs
+            request.trading_pairs,
+            account_name=request.account_name
         )
 
         if "error" in prices:
@@ -452,7 +453,8 @@ async def get_funding_info(
             raise HTTPException(status_code=400, detail="Funding info is only available for perpetual trading pairs.")
         funding_info = await market_data_manager.get_funding_info(
             request.connector_name,
-            request.trading_pair
+            request.trading_pair,
+            account_name=request.account_name
         )
 
         if "error" in funding_info:
@@ -490,7 +492,8 @@ async def get_order_book(
         order_book_data = await market_data_manager.get_order_book_data(
             request.connector_name,
             request.trading_pair,
-            request.depth
+            request.depth,
+            account_name=request.account_name
         )
 
         if "error" in order_book_data:
@@ -534,7 +537,8 @@ async def get_price_for_volume(
             request.connector_name,
             request.trading_pair,
             request.is_buy,
-            volume=request.volume
+            volume=request.volume,
+            account_name=request.account_name
         )
 
         if "error" in result:
@@ -567,7 +571,8 @@ async def get_volume_for_price(
             request.connector_name,
             request.trading_pair,
             request.is_buy,
-            price=request.price
+            price=request.price,
+            account_name=request.account_name
         )
 
         if "error" in result:
@@ -600,7 +605,8 @@ async def get_price_for_quote_volume(
             request.connector_name,
             request.trading_pair,
             request.is_buy,
-            quote_volume=request.quote_volume
+            quote_volume=request.quote_volume,
+            account_name=request.account_name
         )
 
         if "error" in result:
@@ -633,7 +639,8 @@ async def get_quote_volume_for_price(
             request.connector_name,
             request.trading_pair,
             request.is_buy,
-            quote_price=request.price
+            quote_price=request.price,
+            account_name=request.account_name
         )
 
         if "error" in result:
@@ -666,7 +673,8 @@ async def get_vwap_for_volume(
             request.connector_name,
             request.trading_pair,
             request.is_buy,
-            vwap_volume=request.volume
+            vwap_volume=request.volume,
+            account_name=request.account_name
         )
 
         if "error" in result:

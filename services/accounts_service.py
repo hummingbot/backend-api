@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import re
+import time
+import weakref
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -8,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from hummingbot.client.config.config_crypt import ETHKeyFileSecretManger
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, TradeType
+from pydantic import SecretStr
 
 from config import settings
 from database import AccountRepository, AsyncDatabaseManager
@@ -18,6 +21,7 @@ from services.perpetual_trading_service import PerpetualTradingService
 from services.portfolio_analytics_service import PortfolioAnalyticsService
 from utils.file_system import fs_util
 from utils.gateway_certs import build_client_ssl_context
+from utils.security import BackendAPISecurity
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
@@ -46,6 +50,12 @@ class AccountsService:
     to initialize all the connectors that are connected to each account, keep track of the balances of each account and
     update the balances of each account.
     """
+    MASKED_SECRET = "**********"
+
+    # A portfolio refresh prices every held token, and each bridged price costs two live
+    # lookups, so brief reuse keeps a wallet of bridged tokens from issuing 2N calls a cycle.
+    BRIDGED_RATE_TTL = 60.0
+
     default_quotes = {
         "hyperliquid": "USDC",
         "hyperliquid_perpetual": "USD",
@@ -98,6 +108,12 @@ class AccountsService:
 
         # Cache for storing last successful prices by trading pair (per-instance)
         self._last_known_prices = {}
+        # Cross-rate prices resolved through a link asset, per connector instance:
+        # connector -> {pair: (fetched_at, rate)}. Keyed on the instance rather than the
+        # connector name because two accounts running the same exchange can define
+        # different custom markets, so the same pair name can mean different assets with
+        # different prices. Weak so a stopped connector's entries go with it.
+        self._bridged_rates: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
 
         # Database setup for account states and orders (shared manager injected from main.py;
         # tables are created once at startup so no per-service bootstrap is needed)
@@ -539,10 +555,84 @@ class AccountsService:
             for pair_idx, info_idx in enumerate(missing_indices):
                 market = missing_pairs[pair_idx]
                 price = Decimal(str(fallback_prices.get(market, 0)))
+                if price <= 0:
+                    # No direct TOKEN-<quote> market. Route through one the token does
+                    # have (e.g. TOKEN-XRP x XRP-RLUSD) rather than reporting it at zero.
+                    bridged = await self._bridged_price(connector, connector_name, market)
+                    if bridged is not None:
+                        price = bridged
                 tokens_info[info_idx]["price"] = float(price)
                 tokens_info[info_idx]["value"] = float(price * Decimal(str(tokens_info[info_idx]["units"])))
 
         return tokens_info
+
+    async def _bridged_price(self, connector, connector_name: str, market: str) -> Optional[Decimal]:
+        """Price ``BASE-QUOTE`` by routing through an asset the base actually trades against.
+
+        A token whose only market is against something other than the connector's quote
+        cannot be priced by asking for ``TOKEN-<quote>``: that market does not exist, the
+        lookup fails, and the holding is reported as $0.00 despite having a perfectly good
+        live price. On xrpl this is the normal case — the quote is RLUSD but most tokens
+        pair against XRP — and it is not cosmetic, since these values feed portfolio totals.
+
+        The cross-rate resolution that would normally handle this (``find_rate``) works off
+        the ticker pool, and xrpl is in ``UNSUPPORTED_TICKER_CONNECTORS``, so for this
+        connector that pool is always empty. This does the same arithmetic against live
+        prices instead: find a link asset with both ``TOKEN-LINK`` and ``LINK-QUOTE``
+        listed, then multiply the two.
+
+        Results are cached briefly because a portfolio refresh prices every held token and
+        each bridge costs two live lookups; without it a wallet of N bridged tokens would
+        issue 2N calls on every cycle.
+        """
+        cached_for_connector = self._bridged_rates.setdefault(connector, {})
+        cached = cached_for_connector.get(market)
+        if cached is not None and time.time() - cached[0] < self.BRIDGED_RATE_TTL:
+            return cached[1]
+
+        base, quote = market.split("-", 1)
+        try:
+            available = set(await asyncio.wait_for(connector.all_trading_pairs(), timeout=10))
+        except Exception as e:
+            logger.debug(f"Cannot list {connector_name} pairs to bridge {market}: {e}")
+            return None
+
+        link = next(
+            (
+                candidate
+                for candidate in self._bridge_candidates(base, quote, available)
+                if f"{candidate}-{quote}" in available
+            ),
+            None,
+        )
+        if link is None:
+            return None
+
+        legs = await self._safe_get_last_traded_prices(connector, [f"{base}-{link}", f"{link}-{quote}"])
+        first = Decimal(str(legs.get(f"{base}-{link}", 0)))
+        second = Decimal(str(legs.get(f"{link}-{quote}", 0)))
+        if first <= 0 or second <= 0:
+            return None
+
+        rate = first * second
+        cached_for_connector[market] = (time.time(), rate)
+        logger.info(f"Priced {market} on {connector_name} via {base}-{link} x {link}-{quote}")
+        return rate
+
+    @staticmethod
+    def _bridge_candidates(base: str, quote: str, available: set) -> List[str]:
+        """Link assets the base trades against, most likely to be liquid first.
+
+        Only markets with the token as base are used: the reciprocal direction would need
+        an inversion, and every venue seen so far lists both ways round anyway.
+        """
+        links = [
+            pair.split("-", 1)[1]
+            for pair in available
+            if pair.startswith(f"{base}-") and pair.split("-", 1)[1] != quote
+        ]
+        preferred = ["XRP", "USDT", "USDC", "USD", "BTC", "ETH"]
+        return sorted(links, key=lambda link: (preferred.index(link) if link in preferred else len(preferred), link))
     
     async def _safe_get_last_traded_prices(self, connector, trading_pairs, timeout=10):
         """Safely get last traded prices with timeout and error handling.
@@ -653,6 +743,50 @@ class AccountsService:
                     file.endswith('.yml')]
         except FileNotFoundError as e:
             raise HTTPException(status_code=404, detail=str(e))
+
+    def get_credentials(self, account_name: str, connector_name: str) -> Dict[str, Any]:
+        """
+        Return an account's connector configuration as the server has it loaded, with
+        every credential masked.
+
+        Only the names of an account's credentials were readable before, so there was no
+        way to confirm what the running server actually holds for a connector — whether a
+        saved custom_markets or node list really took effect — except by triggering a
+        side-effecting call and inferring the answer from how it behaved.
+
+        Secrets are masked twice over: pydantic renders SecretStr as "**********" in JSON
+        mode, and any field declared SecretStr or marked is_secure is overwritten again
+        here, so a connector that keeps something sensitive in a plain str field is
+        covered too.
+
+        :param account_name: The name of the account.
+        :param connector_name: The name of the connector.
+        :raises FileNotFoundError: if the account has no credentials for that connector.
+        """
+        validate_safe_name(account_name, "account name")
+        validate_safe_name(connector_name, "connector name")
+
+        if not fs_util.path_exists(f"credentials/{account_name}/connectors/{connector_name}.yml"):
+            raise FileNotFoundError(
+                f"Account '{account_name}' has no credentials for connector '{connector_name}'."
+            )
+
+        BackendAPISecurity.login_account(
+            account_name=account_name, secrets_manager=self.secrets_manager
+        )
+        config = BackendAPISecurity.decrypted_value(connector_name)
+        if config is None:
+            raise FileNotFoundError(
+                f"Account '{account_name}' has no credentials for connector '{connector_name}'."
+            )
+
+        hb_config = config.hb_config
+        values = hb_config.model_dump(mode="json")
+        for key, field in hb_config.__class__.model_fields.items():
+            extra = field.json_schema_extra or {}
+            if field.annotation is SecretStr or extra.get("is_secure"):
+                values[key] = self.MASKED_SECRET
+        return values
 
     async def delete_credentials(self, account_name: str, connector_name: str):
         """

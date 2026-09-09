@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException
 from starlette import status
@@ -40,6 +40,36 @@ async def list_account_credentials(account_name: str,
         credentials = accounts_service.list_credentials(account_name)
         # Remove .yml extension from filenames
         return [cred.replace('.yml', '') for cred in credentials]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{account_name}/credentials/{connector_name}", response_model=Dict[str, Any])
+async def get_account_credential(account_name: str, connector_name: str,
+                                 accounts_service: AccountsService = Depends(get_accounts_service)):
+    """
+    Get an account's configuration for one connector, with every credential masked.
+
+    Use this to confirm what the running server actually holds for a connector — for
+    example whether a saved `custom_markets` or node list took effect — without having to
+    infer it from the behaviour of a side-effecting call.
+
+    Args:
+        account_name: Name of the account
+        connector_name: Name of the connector
+
+    Returns:
+        The connector's configuration. Secret fields are returned as "**********".
+
+    Raises:
+        HTTPException: 404 if the account has no credentials for that connector
+    """
+    try:
+        return accounts_service.get_credentials(account_name, connector_name)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
     except HTTPException:
         raise
     except Exception as e:
