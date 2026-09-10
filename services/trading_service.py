@@ -70,6 +70,11 @@ class AccountTradingInterface:
         return self._account_name
 
     @property
+    def market_data_provider(self) -> "MarketDataService":
+        """Return the market data provider used by executors."""
+        return self._market_data_service
+
+    @property
     def connectors(self) -> Dict[str, ConnectorBase]:
         """
         Return connectors for this account from the UnifiedConnectorService.
