@@ -12,6 +12,7 @@ import time
 from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional
 
+from aomi.pipeline.lending import LendingPlan
 from hummingbot.strategy_v2.executors.data_types import ExecutorConfigBase
 from pydantic import Field, model_validator
 
@@ -62,7 +63,8 @@ class OnchainExecutorConfig(ExecutorConfigBase):
     type: Literal["onchain_executor"] = "onchain_executor"
     connector_name: str = Field(
         default="",
-        description="Chain name for record keeping (derived from chain_id when empty, e.g. 'base'); no connector is used"
+        description="Chain name for record keeping (derived from chain_id when empty, e.g. 'base'); "
+                    "no connector is used"
     )
     trading_pair: str = Field(
         default="",
@@ -73,9 +75,13 @@ class OnchainExecutorConfig(ExecutorConfigBase):
         ..., ge=1, description="EVM chain id (1 ethereum, 10 optimism, 8453 base, 42161 arbitrum, ...); pass 1 for svm"
     )
     cluster: str = Field(default="mainnet-beta", description="svm only: Solana cluster the bundle targets")
-    mode: Literal["operation", "calls"] = Field(
+    mode: Literal["operation", "calls", "lending"] = Field(
         ...,
-        description="'operation' builds the bundle from an app/skill catalog operation; 'calls' stages raw EVM calls"
+        description="'operation' builds a catalog operation; 'calls' stages raw EVM calls; "
+                    "'lending' verifies an exact Aave V3 plan"
+    )
+    lending: Optional[LendingPlan] = Field(
+        default=None, description="Exact Aave V3 supply or withdrawal plan, with amounts in raw token units"
     )
     app: str = Field(default="default", description="Aomi app whose catalog and skills the pipeline uses")
     skills: List[str] = Field(default_factory=list, description="Skills to load alongside the app")
@@ -89,7 +95,7 @@ class OnchainExecutorConfig(ExecutorConfigBase):
     )
     calls: Optional[List[Dict[str, Any]]] = Field(
         default=None,
-        description="calls mode: evm_stage_tx argument maps ({to, value, data: {signature, args, raw}, description, ...}); "
+        description="calls mode: evm_stage_tx maps ({to, value, data: {signature, args, raw}, description, ...}); "
                     "chain_id is filled in from the config when a call omits it"
     )
     notional_quote: Optional[Decimal] = Field(
@@ -118,7 +124,14 @@ class OnchainExecutorConfig(ExecutorConfigBase):
 
     @model_validator(mode="after")
     def _check_mode_and_derive(self):
-        if self.mode == "operation":
+        if self.mode == "lending":
+            if self.lending is None or self.chain != "evm" or self.chain_id != self.lending.chain_id:
+                raise ValueError("lending mode requires a plan on the configured EVM chain")
+            if self.calls is not None or self.operation is not None or self.arguments is not None:
+                raise ValueError("lending mode takes only a lending plan")
+        elif self.lending is not None:
+            raise ValueError("lending plan requires lending mode")
+        elif self.mode == "operation":
             if not self.operation:
                 raise ValueError("mode 'operation' requires 'operation'")
             if self.calls is not None:
@@ -141,7 +154,9 @@ class OnchainExecutorConfig(ExecutorConfigBase):
             # The base validator only fills this when the field is passed; ExecutorInfo needs a float.
             self.timestamp = time.time()
         if not self.connector_name:
-            self.connector_name = f"solana-{self.cluster}" if self.chain == "svm" else chain_name(self.chain, self.chain_id)
+            self.connector_name = (
+                f"solana-{self.cluster}" if self.chain == "svm" else chain_name(self.chain, self.chain_id)
+            )
         if not self.trading_pair:
             symbol = "SOL" if self.chain == "svm" else native_symbol(self.chain_id)
             self.trading_pair = f"{symbol}-{symbol}"

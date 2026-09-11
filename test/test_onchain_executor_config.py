@@ -132,7 +132,7 @@ def test_the_schema_endpoint_reads_the_config():
     assert fields["chain_id"]["required"] is True
     assert fields["chain_id"]["constraints"]["minimum"] == 1
     assert fields["mode"]["type"] == "enum"
-    assert set(fields["mode"]["enum_values"]) == {"operation", "calls"}
+    assert set(fields["mode"]["enum_values"]) == {"operation", "calls", "lending"}
     assert fields["mode"]["required"] is True
     assert fields["commit"]["default"] is True
     assert fields["commit"]["required"] is False

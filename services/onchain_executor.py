@@ -167,7 +167,9 @@ class OnchainExecutor(ExecutorBase):
 
     async def _stage(self):
         cfg = self.config
-        if cfg.mode == "calls":
+        if cfg.mode == "lending":
+            self._build = await self._client.stage_evm(cfg.lending.calls(), app=cfg.app, skills=cfg.skills)
+        elif cfg.mode == "calls":
             self._build = await self._client.stage_evm(cfg.calls, app=cfg.app, skills=cfg.skills)
         else:
             self._build = await self._client.build(
@@ -195,6 +197,12 @@ class OnchainExecutor(ExecutorBase):
                 evidence=simulation.raw if simulation is not None else None,
             )
             return
+        if self.config.lending is not None:
+            try:
+                self.config.lending.verify(build)
+            except ValueError as exc:
+                self._fail("lending_plan_changed", exc)
+                return
         for warning in simulation.warnings:
             self.logger().warning(f"onchain_executor {self.config.id}: simulation warning: {warning}")
         if self.config.max_gas_quote is not None:
@@ -206,7 +214,9 @@ class OnchainExecutor(ExecutorBase):
                 )
                 return
             if not self._fees_are_priced():
-                self._fail("gas_unpriced", message="Cannot verify max_gas_quote in USDT: gas estimate or price unavailable")
+                self._fail(
+                    "gas_unpriced", message="Cannot verify max_gas_quote in USDT: gas estimate or price unavailable"
+                )
                 return
         if not self.config.commit:
             self.logger().info(f"onchain_executor {self.config.id}: dry run, simulation passed, not committing")
@@ -379,6 +389,9 @@ class OnchainExecutor(ExecutorBase):
             "wallet_address": build.from_address if build is not None else None,
             "cluster": cfg.cluster if cfg.chain == "svm" else None,
             "digest": self._digest,
+            "build_expires_at": build.expires_at if build is not None else None,
+            "approvals": [dataclasses.asdict(change) for change in simulation.approvals]
+            if simulation is not None else [],
             "action_count": len(actions),
             "actions": actions,
             "simulation_passed": simulation.passed if simulation is not None else None,

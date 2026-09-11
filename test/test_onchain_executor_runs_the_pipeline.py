@@ -486,7 +486,9 @@ async def test_a_gas_budget_refuses_an_expensive_commit():
 @pytest.mark.asyncio
 async def test_a_gas_budget_passes_a_cheap_commit():
     market_data = SimpleNamespace(get_rate=lambda base, quote: Decimal("3000"))
-    executor = _executor(FakePipelineClient(), config=_config(max_gas_quote=Decimal("1")), strategy=_strategy(market_data))
+    executor = _executor(
+        FakePipelineClient(), config=_config(max_gas_quote=Decimal("1")), strategy=_strategy(market_data)
+    )
 
     await _run(executor)
 
@@ -640,3 +642,25 @@ async def test_svm_gas_uses_sol_usdt():
     executor = _executor(client, config=config, strategy=_strategy(SimpleNamespace(get_rate=rate)))
     await _run(executor)
     assert pairs and set(pairs) == {("SOL", "USDT")}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tamper", [False, True])
+async def test_lending_plan_checks_actual_calldata_before_commit(tamper):
+    from aomi.pipeline.lending import LendingPlan
+
+    plan = LendingPlan(8453, "0x" + "11" * 20, "0x" + "22" * 20, WALLET, 1000000, "supply")
+    actions = [dict(call, data=call["data"]["raw"], **{"from": WALLET}) for call in plan.calls()]
+    if tamper:
+        actions[0]["data"] = actions[0]["data"][:-64] + "f" * 64
+    staged = {**STAGED, "actions": actions}
+    simulated = {**SIMULATED, "actions": actions}
+    client = FakePipelineClient(staged=staged, simulated=simulated)
+    executor = _executor(client, config=_config(mode="lending", calls=None, lending=plan))
+    await _run(executor)
+    if tamper:
+        assert "commit" not in client.methods_called()
+        assert executor.get_custom_info()["reason"] == "lending_plan_changed"
+    else:
+        assert "commit" in client.methods_called()
+        assert executor.close_type == CloseType.COMPLETED
