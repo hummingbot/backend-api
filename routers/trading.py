@@ -1,10 +1,10 @@
 import logging
 import math
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Dict, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException
 from hummingbot.core.data_type.common import OrderType, PositionAction, PositionMode, TradeType
-from pydantic import BaseModel
 from starlette import status
 
 from deps import get_accounts_service, get_connector_service, get_trading_history_service
@@ -22,6 +22,7 @@ from models.accounts import LeverageRequest, PositionModeRequest
 from models.pagination import paginate_by_cursor
 from services.accounts_service import AccountsService
 from services.trading_history_service import TradingHistoryService
+from services.unified_connector_service import UnifiedConnectorService
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
@@ -120,7 +121,7 @@ async def cancel_order(
 async def get_positions(
     filter_request: PositionFilterRequest,
     accounts_service: AccountsService = Depends(get_accounts_service),
-    connector_service = Depends(get_connector_service)
+    connector_service: UnifiedConnectorService = Depends(get_connector_service)
 ):
     """
     Get current positions across all or filtered perpetual connectors.
@@ -164,8 +165,6 @@ async def get_positions(
                             all_positions.extend(positions)
                         except Exception as e:
                             # Log error but continue with other connectors
-                            import logging
-
                             logger.warning(f"Failed to get positions for {account_name}/{connector_name}: {e}")
 
         # Sort by cursor_id and apply cursor-based pagination
@@ -179,7 +178,7 @@ async def get_positions(
 @router.post("/orders/active", response_model=PaginatedResponse)
 async def get_active_orders(
     filter_request: ActiveOrderFilterRequest,
-    connector_service = Depends(get_connector_service)
+    connector_service: UnifiedConnectorService = Depends(get_connector_service)
 ):
     """
     Get active (in-flight) orders across all or filtered accounts and connectors.
@@ -231,8 +230,6 @@ async def get_active_orders(
 
                         except Exception as e:
                             # Log error but continue with other connectors
-                            import logging
-
                             logger.warning(f"Failed to get active orders for {account_name}/{connector_name}: {e}")
 
         # Sort by cursor_id and apply cursor-based pagination
@@ -247,10 +244,14 @@ async def get_active_orders(
 async def get_orders(
     filter_request: OrderFilterRequest,
     trading_history_service: TradingHistoryService = Depends(get_trading_history_service),
-    connector_service = Depends(get_connector_service)
+    connector_service: UnifiedConnectorService = Depends(get_connector_service)
 ):
     """
     Get historical order data across all or filtered accounts from the database/registry.
+
+    Orders come newest first. `pagination.next_cursor` is the cursor of the page's last
+    order; pass it back as `cursor` to get the orders older than it. It is `null` on the
+    last page. A cursor this route did not hand out is refused with a 400.
 
     Args:
         filter_request: JSON payload with filtering criteria
@@ -258,64 +259,71 @@ async def get_orders(
     Returns:
         Paginated response with historical order data and pagination metadata
     """
-    try:
-        all_orders = []
+    before = _parse_order_cursor(filter_request.cursor) if filter_request.cursor else None
 
-        # Determine which accounts to query
+    try:
         if filter_request.account_names:
             accounts_to_check = filter_request.account_names
         else:
-            # Get all accounts
-            all_connectors = connector_service.get_all_trading_connectors()
-            accounts_to_check = list(all_connectors.keys())
+            accounts_to_check = list(connector_service.get_all_trading_connectors().keys())
 
-        # Collect orders from all specified accounts
-        for account_name in accounts_to_check:
-            try:
-                orders = await trading_history_service.get_orders(
-                    account_name=account_name,
-                    connector_name=(
-                        filter_request.connector_names[0]
-                        if filter_request.connector_names and len(filter_request.connector_names) == 1
-                        else None
-                    ),
-                    trading_pair=(
-                        filter_request.trading_pairs[0]
-                        if filter_request.trading_pairs and len(filter_request.trading_pairs) == 1
-                        else None
-                    ),
-                    status=filter_request.status,
-                    start_time=filter_request.start_time,
-                    end_time=filter_request.end_time,
-                    limit=filter_request.limit * 2,  # Get more for filtering
-                    offset=0,
-                )
-                # Add cursor-friendly identifier to each order
-                for order in orders:
-                    order["_cursor_id"] = f"{order.get('timestamp', 0)}:{order.get('client_order_id', '')}"
-                all_orders.extend(orders)
-            except Exception as e:
-                # Log error but continue with other accounts
-                import logging
+        # One query over every account, cut at the cursor inside the database, so the page
+        # is exactly the `limit` newest orders older than the cursor. The extra row fetched
+        # past `limit` is how has_more is known without a second query.
+        result = await trading_history_service.search_orders(
+            account_names=accounts_to_check,
+            connector_names=filter_request.connector_names,
+            trading_pairs=filter_request.trading_pairs,
+            status=filter_request.status,
+            start_time=filter_request.start_time,
+            end_time=filter_request.end_time,
+            limit=filter_request.limit + 1,
+            before=before,
+        )
+        orders = result["orders"]
+        page = orders[: filter_request.limit]
+        has_more = len(orders) > filter_request.limit
 
-                logger.warning(f"Failed to get orders for {account_name}: {e}")
-
-        # Apply filters for multiple values
-        if filter_request.connector_names and len(filter_request.connector_names) > 1:
-            all_orders = [order for order in all_orders if order.get("connector_name") in filter_request.connector_names]
-        if filter_request.trading_pairs and len(filter_request.trading_pairs) > 1:
-            all_orders = [order for order in all_orders if order.get("trading_pair") in filter_request.trading_pairs]
-
-        # Sort by timestamp (most recent first) then cursor_id, and apply cursor-based pagination
-        return paginate_by_cursor(
-            all_orders,
-            filter_request.cursor,
-            filter_request.limit,
-            sort_key=lambda x: (x.get("timestamp", 0), x.get("_cursor_id", "")),
-            reverse=True,
+        return PaginatedResponse(
+            data=page,
+            pagination={
+                "limit": filter_request.limit,
+                "has_more": has_more,
+                "next_cursor": _order_cursor(page[-1]) if has_more else None,
+                "total_count": result["total_count"],
+            },
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error fetching orders: {str(e)}")
+
+
+# An order's cursor is "<created_at ISO timestamp>|<client order id>". An ISO timestamp
+# never contains "|", so the first "|" splits it back whatever the order id holds.
+_ORDER_CURSOR_SEPARATOR = "|"
+
+
+def _order_cursor(order: Dict) -> str:
+    """The keyset cursor after `order`, built from the fields an order row really carries."""
+    return f"{order['created_at']}{_ORDER_CURSOR_SEPARATOR}{order['order_id']}"
+
+
+def _parse_order_cursor(cursor: str) -> Tuple[datetime, str]:
+    """Split a cursor from `_order_cursor` back into (created_at, client_order_id).
+
+    Anything else is refused rather than read as "start over": an unrecognised cursor
+    used to serve page one again, which a client walking the history cannot tell from
+    genuinely older orders.
+    """
+    created_at, _, client_order_id = cursor.partition(_ORDER_CURSOR_SEPARATOR)
+    try:
+        if not client_order_id:
+            raise ValueError("no client order id")
+        return datetime.fromisoformat(created_at), client_order_id
+    except ValueError:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid cursor {cursor!r}: pass back the next_cursor of a previous /trading/orders/search page",
+        )
 
 
 # Trade History
@@ -323,7 +331,7 @@ async def get_orders(
 async def get_trades(
     filter_request: TradeFilterRequest,
     trading_history_service: TradingHistoryService = Depends(get_trading_history_service),
-    connector_service = Depends(get_connector_service)
+    connector_service: UnifiedConnectorService = Depends(get_connector_service)
 ):
     """
     Get trade history across all or filtered accounts with complex filtering.
@@ -376,8 +384,6 @@ async def get_trades(
                 all_trades.extend(trades)
             except Exception as e:
                 # Log error but continue with other accounts
-                import logging
-
                 logger.warning(f"Failed to get trades for {account_name}: {e}")
 
         # Apply filters for multiple values
@@ -482,7 +488,8 @@ async def set_leverage(
         Dictionary with success status and message
 
     Raises:
-        HTTPException: 400 for invalid parameters or non-perpetual connector, 404 for account/connector not found, 500 for execution errors
+        HTTPException: 400 for invalid parameters or non-perpetual connector, 404 for account/connector
+            not found, 500 for execution errors
     """
     try:
         result = await accounts_service.set_leverage(
@@ -499,7 +506,7 @@ async def set_leverage(
 async def get_funding_payments(
     filter_request: FundingPaymentFilterRequest,
     trading_history_service: TradingHistoryService = Depends(get_trading_history_service),
-    connector_service = Depends(get_connector_service)
+    connector_service: UnifiedConnectorService = Depends(get_connector_service)
 ):
     """
     Get funding payment history across all or filtered perpetual connectors.
@@ -545,13 +552,12 @@ async def get_funding_payments(
                             # Add cursor-friendly identifier to each payment
                             for payment in payments:
                                 payment["_cursor_id"] = (
-                                    f"{account_name}:{connector_name}:{payment.get('timestamp', '')}:{payment.get('trading_pair', '')}"
+                                    f"{account_name}:{connector_name}:"
+                                    f"{payment.get('timestamp', '')}:{payment.get('trading_pair', '')}"
                                 )
                             all_funding_payments.extend(payments)
                         except Exception as e:
                             # Log error but continue with other connectors
-                            import logging
-
                             logger.warning(f"Failed to get funding payments for {account_name}/{connector_name}: {e}")
 
         # Sort by timestamp (most recent first) then cursor_id, and apply cursor-based pagination
@@ -617,9 +623,23 @@ def _standardize_in_flight_order_response(order, account_name: str, connector_na
         "amount": float(order.amount) if order.amount and not math.isnan(float(order.amount)) else 0,
         "price": float(order.price) if order.price and not math.isnan(float(order.price)) else None,
         "status": status,
-        "filled_amount": float(getattr(order, "executed_amount_base", 0) or 0) if not math.isnan(float(getattr(order, "executed_amount_base", 0) or 0)) else 0,
-        "average_fill_price": float(getattr(order, "last_executed_price", 0)) if getattr(order, "last_executed_price", None) and not math.isnan(float(getattr(order, "last_executed_price", 0))) else None,
-        "fee_paid": float(getattr(order, "cumulative_fee_paid_quote", 0)) if getattr(order, "cumulative_fee_paid_quote", None) and not math.isnan(float(getattr(order, "cumulative_fee_paid_quote", 0))) else None,
+        "filled_amount": (
+            float(getattr(order, "executed_amount_base", 0) or 0)
+            if not math.isnan(float(getattr(order, "executed_amount_base", 0) or 0))
+            else 0
+        ),
+        "average_fill_price": (
+            float(getattr(order, "last_executed_price", 0))
+            if getattr(order, "last_executed_price", None)
+            and not math.isnan(float(getattr(order, "last_executed_price", 0)))
+            else None
+        ),
+        "fee_paid": (
+            float(getattr(order, "cumulative_fee_paid_quote", 0))
+            if getattr(order, "cumulative_fee_paid_quote", None)
+            and not math.isnan(float(getattr(order, "cumulative_fee_paid_quote", 0)))
+            else None
+        ),
         "fee_currency": None,  # InFlightOrder doesn't store fee currency directly
         "created_at": created_at,
         "updated_at": updated_at,
