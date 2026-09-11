@@ -81,3 +81,22 @@ def test_incomplete_evidence_or_changed_venue_refuses(mutation):
 def test_invalid_raw_limits_refuse_at_configuration(limits):
     with pytest.raises(ValidationError):
         policy(max_debits_raw=limits)
+
+
+@pytest.mark.parametrize("unapproved_first", [False, True])
+def test_mixed_markets_refuse_even_when_another_instruction_matches(unapproved_first):
+    raw = evidence()
+    other = copy.deepcopy(raw["actions"][0])
+    other["instruction"]["accounts"] = [{"pubkey": "other-vault"}]
+    raw["actions"].insert(0 if unapproved_first else 1, other)
+    with pytest.raises(ValueError, match="Every selected-protocol instruction"):
+        verify(raw)
+
+
+def test_multiple_selected_market_instructions_and_support_programs_remain_allowed():
+    raw = evidence()
+    raw["actions"].append(copy.deepcopy(raw["actions"][0]))
+    support = copy.deepcopy(raw["actions"][0])
+    support["instruction"].update(program_id="token", accounts=[{"pubkey": "wallet-token"}])
+    raw["actions"].append(support)
+    assert verify(raw, policy(allowed_programs=["protocol", "token"]))["USDC"] == "2000000"

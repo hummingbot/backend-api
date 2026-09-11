@@ -397,8 +397,8 @@ does not require separate Hummingbot venue connectors.
 top-level programs and a map of `max_debits_raw` keyed by mint (or `native` for
 SOL). Every observed outgoing wallet asset must be listed. Limits use unsigned
 raw integer strings, require a native limit, and do not subtract credits from
-other accounts or other balance rows. The selected market must occur in the
-selected protocol's staged instructions. A passing simulation with incomplete
+other accounts or other balance rows. Every staged instruction for the selected protocol must reference the selected
+market. A passing simulation with incomplete
 balance snapshots still refuses the policy before wallet handoff.
 
 These limits apply to final per-account net balance changes in one simulated

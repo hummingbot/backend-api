@@ -52,7 +52,9 @@ class SvmSpendingPolicy(BaseModel):
             accounts = instruction.get("accounts")
             if not isinstance(accounts, list) or any(not isinstance(a, dict) for a in accounts):
                 raise ValueError("Staged account evidence is malformed")
-            if program == self.protocol_program and any(a.get("pubkey") == self.market for a in accounts):
+            if program == self.protocol_program:
+                if not any(a.get("pubkey") == self.market for a in accounts):
+                    raise ValueError("Every selected-protocol instruction must reference the selected market")
                 found_market = True
         if not found_market:
             raise ValueError("Selected market is absent from the selected protocol's instructions")
