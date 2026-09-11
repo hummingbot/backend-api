@@ -32,7 +32,9 @@ from hummingbot.strategy_v2.executors.twap_executor.twap_executor import TWAPExe
 from hummingbot.strategy_v2.executors.xemm_executor.data_types import XEMMExecutorConfig
 from hummingbot.strategy_v2.executors.xemm_executor.xemm_executor import XEMMExecutor
 from hummingbot.strategy_v2.models.executors import CloseType, TrackedOrder
+from sqlalchemy import text
 
+from config import settings
 from database import AsyncDatabaseManager, ExecutorRepository, GatewayCLMMRepository, GatewaySwapRepository
 from models.executors import PositionHold
 from models.onchain_executor import OnchainExecutorConfig
@@ -1419,6 +1421,21 @@ class ExecutorService:
 
             async with self.db_manager.get_session_context() as session:
                 repo = ExecutorRepository(session)
+                if durable and executor.config.commit:
+                    from services.lending_policy import LendingPolicy
+
+                    # One transaction owns validation and insertion. Later admissions see
+                    # this durable pending reservation, including after a process restart.
+                    if settings.aomi.lending_policy_file or executor.config.require_lending_policy:
+                        # Refresh the read snapshot after a competing writer releases the lock.
+                        await session.execute(text("SET TRANSACTION ISOLATION LEVEL READ COMMITTED"))
+                        await session.execute(text("SELECT pg_advisory_xact_lock(713840512345)"))
+                        policy = LendingPolicy.load(settings.aomi.lending_policy_file)
+                        if policy is None:
+                            raise ValueError("Automatic lending requires an active operator policy")
+                        records = await repo.get_executors(executor_type="onchain_executor", limit=None)
+                        policy.admit(executor.config, metadata["account_name"], metadata["controller_id"],
+                                     [self._format_db_record(record) for record in records])
 
                 await repo.create_executor(
                     executor_id=executor_id,

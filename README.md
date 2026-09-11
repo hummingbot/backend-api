@@ -363,3 +363,53 @@ signer-enforced fee cap; it excludes rollup data fees and provider surcharges.
 - **Tailscale guide**: https://hummingbot.org/hummingbot-api/tailscale/
 - **API Docs**: http://localhost:8000/docs
 - **Issues**: https://github.com/hummingbot/hummingbot-api/issues
+
+### Operator lending allocation policy
+
+Set `AOMI_LENDING_POLICY_FILE` on every API process sharing the executor database to
+an operator-owned JSON file. The API re-reads it at admission. A missing or invalid
+configured file refuses committed on-chain creates. Keep this file outside agent
+writable configuration. An example (amounts are raw USDC units, six decimals):
+
+```json
+{
+  "wallet": "0xYOUR_AOMI_SIGNING_WALLET",
+  "account_name": "master_account",
+  "controller_limits_raw": {"reserves-agent": "100000000"},
+  "max_total_supply_raw": "100000000",
+  "max_action_raw": "50000000",
+  "max_gas_quote": "1"
+}
+```
+
+Replace the wallet placeholder with the actual signer. The supported market is
+Base USDC at Aave V3. While configured, all committed on-chain creates must be
+exact lending plans for that wallet and a granted controller. The total limit
+covers recorded net contributions and pending supplies across controllers and
+Hummingbot accounts using that wallet. It is not a USDT market valuation or a cap
+on externally supplied capital, accrued interest, losses, or other trading exposure.
+Withdrawals are limited to the controller's confirmed contributions minus pending
+withdrawals; pending deposits cannot fund withdrawals. Only confirmed withdrawals
+release capacity. Historical raw/operation commits require reconciliation before
+activating this policy because their lending effects cannot be reconstructed.
+
+Admission acquires a PostgreSQL transaction lock, reads full durable history,
+validates the grant, and inserts the pending executor record in the same transaction.
+The executor starts only after commit. Concurrent API processes and process restarts
+therefore see the same reservation. An unknown result continues to reserve capacity;
+operators must reconcile it against actual receipts, not delete history to free limits.
+A policy edit applies to new admissions, not actions already admitted.
+
+`GET /executors/lending/policy` exposes the active grant to authenticated callers.
+Automatic clients must set `require_lending_policy: true`: this prevents a policy
+removed between preview and creation from falling back to unrestricted manual mode.
+Condor's automatic gate remains disabled until its grant and valuation checks are
+connected; this API feature alone does not enable unattended execution.
+
+The real PostgreSQL race/restart regression runs with an isolated local database
+whose name starts `hummingbot_policy_check_`:
+
+```bash
+AOMI_POLICY_TEST_DATABASE_URL=postgresql+asyncpg://USER@127.0.0.1:PORT/hummingbot_policy_check_test \
+  pytest -q test/test_lending_policy_admission.py
+```

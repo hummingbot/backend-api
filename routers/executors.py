@@ -161,6 +161,19 @@ async def list_executors(
         raise HTTPException(status_code=500, detail=f"Error listing executors: {str(e)}")
 
 
+@router.get("/lending/policy")
+async def get_lending_policy():
+    """Read the operator-owned grant; creation revalidates it under the database lock."""
+    from config import settings
+    from services.lending_policy import LendingPolicy
+
+    try:
+        policy = LendingPolicy.load(settings.aomi.lending_policy_file)
+        return policy.report() if policy else {"enabled": False}
+    except Exception:
+        raise HTTPException(status_code=503, detail="Lending policy unavailable")
+
+
 @router.get("/lending/positions")
 async def get_lending_positions(executor_service: ExecutorService = Depends(get_executor_service)):
     """Attributed contributions and unresolved attempts, including completed executors.

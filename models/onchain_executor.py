@@ -83,6 +83,9 @@ class OnchainExecutorConfig(ExecutorConfigBase):
     lending: Optional[LendingPlan] = Field(
         default=None, description="Exact Aave V3 supply or withdrawal plan, with amounts in raw token units"
     )
+    require_lending_policy: bool = Field(
+        default=False, description="Require an active operator lending grant; intended for automatic agent submissions"
+    )
     app: str = Field(default="default", description="Aomi app whose catalog and skills the pipeline uses")
     skills: List[str] = Field(default_factory=list, description="Skills to load alongside the app")
     operation: Optional[str] = Field(

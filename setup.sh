@@ -546,6 +546,8 @@ GATEWAY_PASSPHRASE=$CONFIG_PASSWORD
 # disabled, or point AOMI_TOKEN_FILE at a file holding the token instead.
 AOMI_URL=https://chat.aomi.dev
 AOMI_TOKEN=
+# Optional operator-owned JSON policy; grants are enforced before durable execution admission.
+AOMI_LENDING_POLICY_FILE=
 
 # Paths
 BOTS_PATH=$(pwd)

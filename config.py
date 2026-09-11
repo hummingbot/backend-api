@@ -171,6 +171,10 @@ class AomiSettings(BaseSettings):
     )
     timeout: float = Field(default=30.0, description="Per-request HTTP timeout in seconds")
 
+    lending_policy_file: str = Field(
+        default="", description="Operator-owned JSON lending allocation policy; empty disables automatic grants"
+    )
+
     model_config = SettingsConfigDict(env_prefix="AOMI_", extra="ignore")
 
     @property
