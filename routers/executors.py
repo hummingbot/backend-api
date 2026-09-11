@@ -42,12 +42,20 @@ async def onchain_preparation(request: OnchainPreparationRequest):
     """Read markets/positions or prepare unsigned instructions through the configured Aomi app."""
     from services.onchain_executor import OnchainExecutor
     from services.onchain_preparation import prepare_onchain
+    from aomi.pipeline.errors import PipelineError
 
     try:
         async with OnchainExecutor._default_client() as client:
             return await prepare_onchain(request, client, application_id=settings.aomi.preparation_application_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    except PipelineError as exc:
+        # Log only typed status/code, never upstream bodies, URLs, or credentials.
+        logger.warning("Aomi preparation failed: status=%s code=%s", exc.status,
+                       "operation_in_flight" if exc.code == "operation_in_flight" else "pipeline_error")
+        if exc.status == 409 and exc.code == "operation_in_flight":
+            raise HTTPException(status_code=409, detail="Aomi account is busy. Wait for its current operation to finish, then try again.")
+        raise HTTPException(status_code=502, detail="Aomi market preparation is unavailable")
     except Exception:
         # Credential-bearing upstream URLs and bodies must not reach API clients.
         raise HTTPException(status_code=502, detail="Aomi market preparation is unavailable")
