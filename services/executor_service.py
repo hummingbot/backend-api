@@ -611,7 +611,8 @@ class ExecutorService:
         executor_class: Type[ExecutorBase],
         typed_config: ExecutorConfigBase,
         trading_interface: AccountTradingInterface,
-        metadata: Dict[str, Any]
+        metadata: Dict[str, Any],
+        start: bool = True,
     ) -> tuple[str, ExecutorBase]:
         """
         Instantiate the executor, register it in memory and start it.
@@ -646,9 +647,12 @@ class ExecutorService:
         self._executor_metadata[executor_id] = metadata
 
         # Set ContextVar so the asyncio Task created by start() inherits it
-        token = current_executor_id.set(executor_id)
-        executor.start()
-        current_executor_id.reset(token)
+        if start:
+            token = current_executor_id.set(executor_id)
+            try:
+                executor.start()
+            finally:
+                current_executor_id.reset(token)
 
         return executor_id, executor
 
@@ -696,10 +700,25 @@ class ExecutorService:
             "created_at": datetime.now(timezone.utc),
             "config": executor_config
         }
-        executor_id, executor = self._instantiate_and_register(executor_class, typed_config, trading_interface, metadata)
+        durable_start = executor_type == "onchain_executor"
+        executor_id, executor = self._instantiate_and_register(
+            executor_class, typed_config, trading_interface, metadata, start=not durable_start
+        )
 
-        # Persist to database
-        await self._persist_executor_created(executor_id, executor)
+        # On-chain submissions must have durable attribution before any network action.
+        try:
+            await self._persist_executor_created(executor_id, executor)
+        except BaseException:
+            if durable_start:
+                self._active_executors.pop(executor_id, None)
+                self._executor_metadata.pop(executor_id, None)
+            raise
+        if durable_start:
+            token = current_executor_id.set(executor_id)
+            try:
+                executor.start()
+            finally:
+                current_executor_id.reset(token)
 
         # Capture created_at before potential cleanup
         created_at = metadata["created_at"].isoformat()
@@ -793,6 +812,26 @@ class ExecutorService:
                 logger.error(f"Error fetching executors from database: {e}")
 
         return result
+
+    async def get_lending_positions(self) -> List[Dict[str, Any]]:
+        """Read the full durable ledger; database failures must never look empty."""
+        from services.lending_positions import LendingPosition
+
+        if self.db_manager is None:
+            raise RuntimeError("Persistent executor storage is unavailable")
+        async with self.db_manager.get_session_context() as session:
+            repo = ExecutorRepository(session)
+            records = await repo.get_executors(executor_type="onchain_executor", limit=None)
+            by_id = {record.executor_id: self._format_db_record(record) for record in records}
+        # Live state supersedes the persisted snapshot for the same executor.
+        for executor_id, executor in self._active_executors.items():
+            if self._executor_metadata.get(executor_id, {}).get("executor_type") == "onchain_executor":
+                by_id[executor_id] = self._format_executor_info(executor_id, executor)
+        positions = LendingPosition.from_executors(by_id.values())
+        if not positions:
+            return []
+        async with OnchainExecutor._default_client() as client:
+            return await LendingPosition.read_wallet_balances(positions, client)
 
     async def get_executor(self, executor_id: str) -> Optional[Dict[str, Any]]:
         """
@@ -1047,7 +1086,13 @@ class ExecutorService:
             await self._aggregate_position_hold(executor_id, executor, metadata)
 
         # Persist final state to database
-        await self._persist_executor_completed(executor_id, executor)
+        try:
+            await self._persist_executor_completed(executor_id, executor)
+        except BaseException:
+            # Keep the confirmed/uncertain result visible and retry persistence on
+            # the next control tick. The durable initial record also survives restart.
+            self._active_executors[executor_id] = executor
+            raise
 
         # The rent refund is only known once the close confirms, which is here. A
         # successful close has already cleared position_address from custom_info, so this
@@ -1363,7 +1408,10 @@ class ExecutorService:
 
     async def _persist_executor_created(self, executor_id: str, executor: ExecutorBase):
         """Persist executor creation to database."""
+        durable = self._executor_metadata.get(executor_id, {}).get("executor_type") == "onchain_executor"
         if not self.db_manager:
+            if durable:
+                raise RuntimeError("On-chain execution requires persistent executor storage")
             return
 
         try:
@@ -1387,10 +1435,15 @@ class ExecutorService:
 
         except Exception as e:
             logger.error(f"Error persisting executor creation: {e}")
+            if durable:
+                raise
 
     async def _persist_executor_completed(self, executor_id: str, executor: ExecutorBase):
         """Persist executor completion to database."""
+        durable = self._executor_metadata.get(executor_id, {}).get("executor_type") == "onchain_executor"
         if not self.db_manager:
+            if durable:
+                raise RuntimeError("On-chain completion requires persistent executor storage")
             return
 
         try:
@@ -1443,6 +1496,8 @@ class ExecutorService:
                 final_state_json = json.dumps(custom_info, default=_json_default)
             except Exception as e:
                 logger.warning(f"Failed to serialize custom_info for {executor_id}: {e}")
+                if durable:
+                    raise
                 # Try a simpler serialization without complex objects
                 try:
                     simple_info = {k: v for k, v in custom_info.items()
@@ -1487,6 +1542,8 @@ class ExecutorService:
 
         except Exception as e:
             logger.error(f"Error persisting executor completion: {e}")
+            if durable:
+                raise
 
     # ========================================
     # Position Hold Tracking Methods

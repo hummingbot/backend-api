@@ -404,6 +404,7 @@ class OnchainExecutor(ExecutorBase):
             "quote_asset": "USDT",
             "fees_quote_source": "priced" if self._fees_are_priced() else "unpriced",
             "committed": bool(outcome is not None and outcome.confirmed),
+            "commit_attempted": self._commit_sent,
             "outcome_kind": outcome.kind if outcome is not None else None,
             "tx_hashes": list(outcome.tx_hashes) if outcome is not None else [],
             "tx_ids": list(outcome.tx_ids) if outcome is not None else [],

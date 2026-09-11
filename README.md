@@ -330,6 +330,33 @@ make tailscale-status     # Check tailnet peers
 ```
 Confirm the node appears in `tailscale status` and that MagicDNS is enabled in your Tailscale admin console.
 
+## Aomi on-chain executors
+
+`onchain_executor` runs a transaction bundle through Aomi's stage, simulate and
+commit lifecycle. Configure `AOMI_URL` and either `AOMI_TOKEN_FILE` or
+`AOMI_TOKEN`; the Aomi account owns the signer. A Hummingbot exchange connector
+or Gateway wallet is not required. PostgreSQL is required: creation is saved
+before the executor starts, and failed completion writes retain the live result
+for retry.
+
+For Aave V3, `mode: "lending"` takes an exact `lending` plan containing
+`chain_id`, `wallet`, `pool`, `asset`, `action` (`supply` or `withdraw`) and
+`amount` in raw token units. The executor verifies every staged call against
+that plan before committing. Use `commit: false` to preview first. A pending
+wallet-signature response is not reported as a confirmed transaction.
+
+`GET /executors/lending/positions` reconstructs controller contributions from
+durable executor history and reads the wallet's current receipt-token balance
+for the supported Base USDC/Aave market. It reports raw amounts as strings.
+Contributions are not current asset balances or profit; a shared wallet's
+receipt balance is shown separately and is never divided between controllers.
+Unknown submission outcomes remain unresolved, duplicate receipts count once,
+and storage or balance-read failures return 503 instead of an empty portfolio.
+
+`max_gas_quote` checks estimated execution gas in USDT using the market-data
+price pool. Missing pricing stops a bounded request. This is an estimate, not a
+signer-enforced fee cap; it excludes rollup data fees and provider surcharges.
+
 ## Support
 
 - **Docs**: https://hummingbot.org/hummingbot-api/

@@ -230,3 +230,51 @@ async def test_the_type_listing_offers_it():
     assert "onchain_executor" in types
     assert types["onchain_executor"]["description"]
     assert types["onchain_executor"]["use_case"]
+
+
+@pytest.mark.asyncio
+async def test_onchain_never_starts_before_durable_creation(fake_pipeline, monkeypatch):
+    service = _service()
+    started = MagicMock()
+    monkeypatch.setattr(OnchainExecutor, "start", started)
+
+    async def failed_storage(*_):
+        started.assert_not_called()
+        raise RuntimeError("storage unavailable")
+
+    service._persist_executor_created = failed_storage
+    with pytest.raises(RuntimeError, match="storage unavailable"):
+        await service.create_executor(
+            {"type": "onchain_executor", "chain_id": 8453, "mode": "calls", "calls": [A_CALL]},
+        )
+    started.assert_not_called()
+    assert service._active_executors == {}
+    assert service._executor_metadata == {}
+
+
+@pytest.mark.asyncio
+async def test_onchain_creation_requires_storage():
+    service = _service()
+    service._executor_metadata["test"] = {"executor_type": "onchain_executor"}
+    with pytest.raises(RuntimeError, match="persistent executor storage"):
+        await ExecutorService._persist_executor_created(service, "test", MagicMock())
+
+
+@pytest.mark.asyncio
+async def test_failed_completion_storage_keeps_result_visible_for_retry(fake_pipeline):
+    service = _service()
+    result = await service.create_executor(
+        {"type": "onchain_executor", "chain_id": 8453, "mode": "calls", "calls": [A_CALL]},
+    )
+    executor_id = result["executor_id"]
+    executor = service._active_executors[executor_id]
+    await asyncio.wait_for(executor.terminated.wait(), 5)
+    service._persist_executor_completed = AsyncMock(side_effect=[RuntimeError("offline"), None])
+    with pytest.raises(RuntimeError, match="offline"):
+        await service._handle_executor_completion(executor_id)
+    assert service._active_executors[executor_id] is executor
+    assert executor.get_custom_info()["tx_hashes"] == [TX_HASH]
+    assert executor_id in service._executor_metadata
+    await service._handle_executor_completion(executor_id)
+    assert executor_id not in service._active_executors
+    assert executor_id not in service._executor_metadata

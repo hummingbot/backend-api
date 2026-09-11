@@ -161,6 +161,21 @@ async def list_executors(
         raise HTTPException(status_code=500, detail=f"Error listing executors: {str(e)}")
 
 
+@router.get("/lending/positions")
+async def get_lending_positions(executor_service: ExecutorService = Depends(get_executor_service)):
+    """Attributed contributions and unresolved attempts, including completed executors.
+
+    Raw amounts are strings. These are not live balances or available withdrawals;
+    receipt-token balances must be reconciled separately. A storage or history error
+    returns 503, never a partial list or a zero balance.
+    """
+    try:
+        return {"positions": await executor_service.get_lending_positions()}
+    except Exception:
+        logger.exception("Lending position history is unavailable")
+        raise HTTPException(status_code=503, detail="Lending position history is unavailable")
+
+
 @router.get("/summary", response_model=ExecutorsSummaryResponse)
 async def get_executors_summary(
     executor_service: ExecutorService = Depends(get_executor_service)
