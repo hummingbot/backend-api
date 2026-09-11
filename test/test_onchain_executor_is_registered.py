@@ -162,8 +162,9 @@ async def test_completion_persists_the_transaction_hashes(fake_pipeline):
         def __init__(self, _session):
             pass
 
-        async def update_executor(self, **kwargs):
+        async def upsert_executor_completion(self, **kwargs):
             updates.append(kwargs)
+            return None, False
 
     @asynccontextmanager
     async def session_context():
@@ -278,3 +279,28 @@ async def test_failed_completion_storage_keeps_result_visible_for_retry(fake_pip
     await service._handle_executor_completion(executor_id)
     assert executor_id not in service._active_executors
     assert executor_id not in service._executor_metadata
+
+
+@pytest.mark.asyncio
+async def test_duplicate_durable_creation_never_starts_another_transaction(fake_pipeline, monkeypatch):
+    from sqlalchemy.exc import IntegrityError
+
+    service = _service()
+    started = MagicMock()
+    monkeypatch.setattr(OnchainExecutor, "start", started)
+    duplicate = IntegrityError("insert", {}, Exception("duplicate executor id"))
+
+    @asynccontextmanager
+    async def duplicate_storage():
+        raise duplicate
+        yield
+
+    service.db_manager = SimpleNamespace(get_session_context=duplicate_storage)
+    del service._persist_executor_created
+    with pytest.raises(IntegrityError):
+        await service.create_executor(
+            {"type": "onchain_executor", "chain_id": 8453, "mode": "calls", "calls": [A_CALL]},
+        )
+    started.assert_not_called()
+    assert service._active_executors == {}
+    assert service._executor_metadata == {}

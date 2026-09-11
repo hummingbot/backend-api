@@ -25,7 +25,7 @@ run: emqx-auth
 			sudo tailscale up --authkey="$${TAILSCALE_AUTH_KEY}" --hostname="$${TAILSCALE_HOSTNAME:-hummingbot-api}" --accept-dns=true; \
 		fi; \
 		tailscale serve status 2>/dev/null | grep -q ":8000" || \
-			sudo tailscale serve --bg http:8000 http://localhost:8000; \
+			sudo tailscale serve --bg --tcp=8000 tcp://127.0.0.1:8000; \
 		echo "[INFO] Binding uvicorn to 127.0.0.1 (tailscale serve exposes port 8000 on tailnet)"; \
 		conda run --no-capture-output -n hummingbot-api uvicorn main:app --reload --host 127.0.0.1 --port 8000; \
 	else \
@@ -33,15 +33,43 @@ run: emqx-auth
 	fi
 
 # Deploy with Docker
-# When TAILSCALE_ENABLED=true: adds the Tailscale sidecar compose override
+#
+# Tailnet ownership is resolved HERE, not only at setup time. A setup-time
+# decision is bypassed by every normal day-2 command: `make reset` deletes
+# .env while a sidecar may still be running, and this target is routinely run
+# on its own against an .env written weeks earlier. Whatever setup.sh recorded
+# is a preference; what the host actually looks like right now is the fact.
+#
+#   none     plain compose, no overlay
+#   host     this machine is already on the tailnet -- expose 8000 via
+#            `tailscale serve` on the existing node instead of joining twice
+#   sidecar  the API gets its own tailnet node, in userspace mode when a
+#            native daemon is already present
 deploy: $(SETUP_SENTINEL) emqx-auth
 	@set -a; [ -f .env ] && . ./.env; set +a; \
-	if [ "$${TAILSCALE_ENABLED:-false}" = "true" ]; then \
-		echo "[INFO] Deploying with Tailscale sidecar..."; \
-		docker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d; \
-	else \
-		docker compose up -d; \
-	fi
+	. ./tailnet-state.sh; \
+	mode="$$(tailnet_mode)" || exit 1; \
+	case "$$mode" in \
+	  none) \
+	    docker compose up -d ;; \
+	  host) \
+	    echo "[INFO] Tailscale: reusing this host's existing node (mode=host)."; \
+	    docker compose up -d; \
+	    if command -v tailscale >/dev/null 2>&1; then \
+	      tailscale serve status 2>/dev/null | grep -q ":8000" || \
+	        sudo tailscale serve --bg --tcp=8000 tcp://127.0.0.1:8000 || \
+	        echo "[WARN] Could not configure serve for :8000 — run it yourself: sudo tailscale serve --bg --tcp=8000 tcp://127.0.0.1:8000"; \
+	    else \
+	      echo "[WARN] mode=host but no tailscale CLI on PATH — port 8000 is loopback-only."; \
+	    fi ;; \
+	  sidecar) \
+	    if tailnet_needs_userspace; then \
+	      echo "[INFO] A tailscaled already owns this host's tailnet device."; \
+	      echo "[INFO] Starting the sidecar in userspace mode so both can coexist."; \
+	      export TS_USERSPACE=true; \
+	    fi; \
+	    docker compose -f docker-compose.yml -f docker-compose.tailscale.yml up -d ;; \
+	esac
 
 # Verify dependencies, .env, containers, port exposure and API access.
 # Read-only; exits non-zero when a check actually fails.
@@ -202,11 +230,72 @@ build:
 #   - removes all .yml files under bots/credentials/master_account/
 reset:
 	@echo "[INFO] Checking for running hummingbot-api services..."
-	@if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx 'hummingbot-api'; then \
-		echo "[INFO] Docker containers running — stopping and wiping volumes..."; \
-		docker compose down -v; \
+	@# Both compose files, always. The Tailscale sidecar and its state volume are
+	@# declared ONLY in the overlay, so a base-file-only `down -v` leaves the
+	@# container running as an orphan -- still holding the host's tailscale0
+	@# device -- while .env is deleted, so the next `make setup` has no record
+	@# that it exists. --remove-orphans covers a sidecar left by an older layout.
+	@# Unconditional when Docker is available, rather than gated on finding a
+	@# named container. `make run` (source) starts only emqx and postgres, so a
+	@# name check for hummingbot-api/the sidecar skipped the teardown entirely
+	@# while reset still deleted .env and the credential state -- leaving the
+	@# broker's volume, and the accounts seeded from the OLD BROKER_PASSWORD,
+	@# to be reused by a setup that generates a new one. That is the same
+	@# .env/broker desync `make emqx-auth-reset` exists to repair.
+	@# `down` on a project with nothing running is a no-op, so there is no
+	@# case worth guarding against.
+	@# Reset is all-or-nothing. If the volumes cannot be dropped, deleting .env
+	@# and the credential state anyway is worse than not resetting at all: the
+	@# next setup generates a new BROKER_PASSWORD while the retained EMQX volume
+	@# still holds the account seeded from the old one, so the broker comes up
+	@# healthy and rejects the API's correct credentials. Recovering needs
+	@# `make emqx-auth-reset` -- which also needs the Docker that was missing.
+	@if ! docker info >/dev/null 2>&1; then \
+		if [ "$(ALLOW_PARTIAL_RESET)" = "1" ]; then \
+			echo "[WARN] Docker unavailable; removing local files only (ALLOW_PARTIAL_RESET=1)."; \
+			echo "[WARN] Container volumes are UNTOUCHED. Run 'make emqx-auth-reset' once Docker is back,"; \
+			echo "[WARN] or the broker will keep rejecting the credentials the next setup generates."; \
+		else \
+			echo "[ERROR] Docker is not available, so container volumes cannot be wiped." >&2; \
+			echo "[ERROR] Refusing to reset: removing .env while the broker keeps its old" >&2; \
+			echo "[ERROR] accounts leaves an install that authenticates against nothing." >&2; \
+			echo "[ERROR] Start Docker (or fix its permissions) and re-run 'make reset'." >&2; \
+			echo "[ERROR] To remove local files anyway: make reset ALLOW_PARTIAL_RESET=1" >&2; \
+			exit 1; \
+		fi; \
 	else \
-		echo "[INFO] No Docker containers running."; \
+		echo "[INFO] Stopping containers and wiping volumes..."; \
+		docker compose -f docker-compose.yml -f docker-compose.tailscale.yml down -v --remove-orphans; \
+	fi
+	@# Verify the teardown actually took, rather than trusting that it ran.
+	@# Compose derives the project name from COMPOSE_PROJECT_NAME, else the
+	@# directory name -- so a stack deployed under a different name, or before
+	@# this directory was renamed, is untouched by the `down` above, which then
+	@# succeeds as a no-op. Deleting .env after that leaves the broker holding
+	@# accounts seeded from a password the next setup will never generate, and
+	@# it surfaces as bots that cannot authenticate against a healthy broker.
+	@#
+	@# Any surviving emqx-data volume is treated as ours to be safe about:
+	@# aborting costs one environment variable, proceeding costs a silent
+	@# authentication failure that needs `make emqx-auth-reset` to unpick.
+	@# The query's own failure must not read as "no leftovers": that is the
+	@# permissive answer, and it would delete .env on a teardown nobody could
+	@# verify. An unanswerable check is treated exactly like a positive one.
+	@if leftover="$$(docker volume ls -q --filter 'label=com.docker.compose.volume=emqx-data' 2>/dev/null)"; then \
+		:; \
+	else \
+		leftover='<could not query docker volumes>'; \
+	fi; \
+	if [ -n "$$leftover" ] && [ "$(ALLOW_PARTIAL_RESET)" != "1" ]; then \
+		echo "[ERROR] A broker data volume survived the teardown:" >&2; \
+		for v in $$leftover; do echo "           $$v" >&2; done; \
+		echo "[ERROR] It belongs to a compose project under a different name — this stack was" >&2; \
+		echo "[ERROR] deployed with another COMPOSE_PROJECT_NAME, or this directory has been" >&2; \
+		echo "[ERROR] renamed since. Removing .env now would leave that broker holding accounts" >&2; \
+		echo "[ERROR] the next setup cannot reproduce." >&2; \
+		echo "[ERROR] Remove it first:  docker volume rm <name above>" >&2; \
+		echo "[ERROR] Or reset local files anyway:  make reset ALLOW_PARTIAL_RESET=1" >&2; \
+		exit 1; \
 	fi
 	@if pgrep -f "uvicorn main[:]app" >/dev/null 2>&1; then \
 		echo "[INFO] Source uvicorn process found — stopping..."; \

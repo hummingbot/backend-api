@@ -26,7 +26,13 @@ services:
     environment:
       - TS_AUTHKEY=${TAILSCALE_AUTH_KEY}
       - TS_STATE_DIR=/var/lib/tailscale
-      - TS_USERSPACE=false
+      # Kernel mode by default -- but `make deploy` sets TS_USERSPACE=true when
+      # this host already runs its own tailscaled, because two kernel-mode
+      # daemons in one network namespace cannot both own tailscale0 and the
+      # loser dies silently inside a container that still reports "running".
+      # Netstack coexists with a kernel-mode daemon unconditionally and can
+      # still serve a loopback-bound port, which is all this sidecar does.
+      - TS_USERSPACE=${TS_USERSPACE:-false}
       - TS_HOSTNAME=${TAILSCALE_HOSTNAME:-hummingbot-api}
       - TS_SERVE_CONFIG=/config/tailscale-serve.json
     volumes:

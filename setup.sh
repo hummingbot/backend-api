@@ -94,8 +94,9 @@ prompt_required_secret_tty() {
       echo "[WARN] This value cannot be empty" >&2
       continue
     fi
-    if [[ "$value" =~ [[:space:]] ]]; then
-      echo "[WARN] Spaces are not supported here -- .env is read by three different parsers that disagree on quoting" >&2
+    if env_value_unsafe "$value"; then
+      echo "[WARN] Not supported here: spaces and  \` \$ \" ' \\ ; & | < > ( ) ~" >&2
+      echo "[WARN] .env is read by three different parsers, and the Makefile sources it -- these would execute rather than parse." >&2
       continue
     fi
     confirm="$(prompt_secret_tty "Confirm: ")"
@@ -106,6 +107,27 @@ prompt_required_secret_tty() {
     echo "$value"
     return 0
   done
+}
+
+# Characters that are unsafe in a .env value.
+#
+# The Makefile's run/deploy/emqx-auth targets read .env with `. ./.env`, so a
+# value is not merely parsed there -- it is EXECUTED. A password containing
+# $(...) or a `;` runs as the deploying user. Spaces were already rejected
+# below because ".env is read by three different parsers that disagree on
+# quoting"; this is the same argument, for the characters where the
+# disagreement is arbitrary code rather than a truncated value.
+#
+# Rejected: whitespace and  ` $ " ' \ ; & | < > ( ) ~
+# Still allowed:  A-Z a-z 0-9 ! @ # % ^ * - _ = + [ ] { } : , . ? /
+#
+# Validated HERE because setup.sh is the only writer of .env -- one author
+# means one place to enforce this, for typed and caller-supplied values alike.
+env_value_unsafe() {
+  case "$1" in
+    *[[:space:]]*|*'`'*|*'$'*|*'"'*|*"'"*|*'\'*|*';'*|*'&'*|*'|'*|*'<'*|*'>'*|*'('*|*')'*|*'~'*) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 resolve_script_dir() {
@@ -221,6 +243,17 @@ ensure_curl_on_linux() {
 # --------------------------
 # Docker Install / Validation
 # --------------------------
+# Who is running this, for the docker-group messages below.
+#
+# $USER is set by login shells, and is NOT set by several ways this script is
+# legitimately run as root: `docker exec`, cloud-init, a systemd unit, some CI
+# runners. Under `set -euo pipefail` a bare "$USER" is then a fatal unbound
+# variable, and the install died before its first prompt -- on the root path,
+# where the group question is moot anyway. `id -un` always answers.
+current_user() {
+  printf '%s' "${USER:-$(id -un)}"
+}
+
 check_user_in_docker_group() {
   # Check if current user is already in docker group
   if [[ "${EUID}" -eq 0 ]]; then
@@ -229,7 +262,7 @@ check_user_in_docker_group() {
   fi
   
   if has_cmd getent && getent group docker >/dev/null 2>&1; then
-    if id -nG "$USER" 2>/dev/null | grep -qw docker; then
+    if id -nG "$(current_user)" 2>/dev/null | grep -qw docker; then
       return 0
     fi
   fi
@@ -240,14 +273,14 @@ check_user_in_docker_group() {
 add_user_to_docker_group() {
   # Only add user to docker group if not already a member
   if check_user_in_docker_group; then
-    echo "[OK] User '$USER' is already in the 'docker' group."
+    echo "[OK] User '$(current_user)' is already in the 'docker' group."
     return 0
   fi
   
   if has_cmd getent && getent group docker >/dev/null 2>&1; then
     if [[ "${EUID}" -ne 0 ]]; then
       echo "[INFO] Adding current user to 'docker' group (may require re-login)..."
-      sudo usermod -aG docker "$USER" >/dev/null 2>&1 || true
+      sudo usermod -aG docker "$(current_user)" >/dev/null 2>&1 || true
       echo "[OK] User added to docker group. You may need to log out and back in for this to take effect."
     fi
   fi
@@ -393,11 +426,28 @@ pull_hummingbot_image() {
 # --------------------------
 echo "[INFO] OS=${OS} ARCH=${ARCH}"
 
+# HBAPI_SKIP_DEPS=1 skips the apt/Docker installation pass only -- for a caller
+# that has already established both (Condor's installer checks `docker info`
+# before it ever gets here). Without it, delegation means every Condor install
+# re-runs an apt-get build-dep pass and a Docker install probe that cannot
+# change anything, adding minutes to a run that already satisfied them.
+#
+# Deliberately NOT skipped: the Hummingbot image pull below. Dependency checks
+# are the caller's to vouch for; a missing bot image is a functional gap no
+# caller currently covers.
+if [ "${HBAPI_SKIP_DEPS:-0}" = "1" ]; then
+  echo "[INFO] Skipping dependency install (HBAPI_SKIP_DEPS=1) — caller vouches for docker + build deps."
+  DOCKER_ALREADY_PRESENT=true
+  COMPOSE_ALREADY_PRESENT=true
+else
+
 if is_linux; then
   install_linux_build_deps
 fi
 
 ensure_docker_and_compose
+
+fi
 
 # Show summary of what was done
 echo ""
@@ -437,14 +487,105 @@ if [ -f ".env" ]; then
   exit 0
 fi
 
+# --------------------------
+# Non-interactive mode
+# --------------------------
+# Lets another installer (Condor's setup-environment.sh, CI, a provisioning
+# script) drive this setup without a human. It exists because the alternative
+# -- a caller hand-writing .env itself -- is how the schema drifted before:
+# a second author shipped BROKER_PASSWORD=password and omitted
+# BROKER_DASHBOARD_PASSWORD entirely, leaving the broker with credentials that
+# did not match its own bootstrap file.
+#
+# Only the values a human would TYPE are accepted here. Everything this script
+# GENERATES -- both broker passwords above all -- stays generated in both
+# modes, so a caller cannot supply a weak one. That is the whole point: .env
+# has exactly one author regardless of who started the run.
+#
+# The prompts below read from /dev/tty, so they cannot be fed by a pipe; this
+# is the supported way to answer them programmatically.
+HBAPI_NONINTERACTIVE="${HBAPI_NONINTERACTIVE:-0}"
+
+# Captured before the defaults below reset them -- these three are the only
+# Tailscale settings a caller may supply, and the reset would otherwise
+# silently discard them.
+_env_ts_enabled="${TAILSCALE_ENABLED:-}"
+_env_ts_key="${TAILSCALE_AUTH_KEY:-}"
+_env_ts_host="${TAILSCALE_HOSTNAME:-}"
+# Optional caller tuning. Emitted only when supplied, so a standalone install's
+# .env is unchanged and this repo's own defaults keep applying.
+_env_bt_concurrent="${HBAPI_BACKTESTING_MAX_CONCURRENT:-}"
+_env_bt_timeout="${HBAPI_BACKTESTING_TIMEOUT_SECONDS:-}"
+
 # Clear screen before prompting user (only if running interactively)
-if [[ -t 0 ]] && [[ -c /dev/tty ]]; then
-  if has_cmd clear; then
-    clear
-  else
-    printf "\033c"
-  fi
+if [ "$HBAPI_NONINTERACTIVE" != "1" ] && [[ -t 0 ]] && [[ -c /dev/tty ]]; then
+  # `clear` exits non-zero when TERM is unset (a tty without a termcap entry --
+  # CI runners, `script` wrappers, some IDE terminals). Under `set -e` that
+  # aborted the whole setup before a single prompt, so fall back to the escape
+  # sequence rather than trusting the exit status.
+  clear 2>/dev/null || printf "\033c"
 fi
+
+TAILSCALE_ENABLED=false
+TAILSCALE_AUTH_KEY=""
+TAILSCALE_HOSTNAME="hummingbot-api"
+
+if [ "$HBAPI_NONINTERACTIVE" = "1" ]; then
+  echo "Hummingbot API Setup (non-interactive)"
+  echo ""
+  # Fail loudly rather than writing a half-configured .env: these three guard
+  # an API that can place orders and read balances, and there is no safe
+  # default for any of them.
+  : "${HBAPI_USERNAME:?HBAPI_NONINTERACTIVE=1 requires HBAPI_USERNAME}"
+  : "${HBAPI_PASSWORD:?HBAPI_NONINTERACTIVE=1 requires HBAPI_PASSWORD}"
+  : "${HBAPI_CONFIG_PASSWORD:?HBAPI_NONINTERACTIVE=1 requires HBAPI_CONFIG_PASSWORD}"
+  USERNAME="$HBAPI_USERNAME"
+  PASSWORD="$HBAPI_PASSWORD"
+  CONFIG_PASSWORD="$HBAPI_CONFIG_PASSWORD"
+  for _v in USERNAME PASSWORD CONFIG_PASSWORD; do
+    eval "_val=\$$_v"
+    if env_value_unsafe "$_val"; then
+      echo "[ERROR] $_v contains a character that is unsafe in .env: spaces or  \` \$ \" ' \\ ; & | < > ( ) ~" >&2
+      echo "[ERROR] The Makefile sources .env, so these would execute rather than parse." >&2
+      exit 1
+    fi
+  done
+
+  # TAILSCALE_ENABLED is the caller-facing switch and keeps its historical
+  # name. TAILSCALE_MODE is accepted as a forward-looking alias so callers can
+  # already say what they mean (none|host|sidecar); only "none" differs from
+  # enabled=true today, the host/sidecar split lands with the ownership work.
+  case "${TAILSCALE_MODE:-}" in
+    none)           TAILSCALE_ENABLED=false ;;
+    host|sidecar)   TAILSCALE_ENABLED=true ;;
+    "")             case "$_env_ts_enabled" in
+                      [Tt]rue|[Yy]es|1) TAILSCALE_ENABLED=true ;;
+                      *)                TAILSCALE_ENABLED=false ;;
+                    esac ;;
+    *) echo "[ERROR] TAILSCALE_MODE must be none, host or sidecar (got: $TAILSCALE_MODE)" >&2; exit 1 ;;
+  esac
+
+  if [ "$TAILSCALE_ENABLED" = true ]; then
+    TAILSCALE_AUTH_KEY="$_env_ts_key"
+    TAILSCALE_HOSTNAME="${_env_ts_host:-hummingbot-api}"
+    # An auth key registers a NEW node, so only the sidecar needs one. In host
+    # mode we serve on a node this machine already has, and demanding a
+    # credential for that would fail installs that are entirely correct --
+    # which is exactly the co-located Condor case.
+    if [ "${TAILSCALE_MODE:-}" != "host" ]; then
+      if [ -z "$TAILSCALE_AUTH_KEY" ]; then
+        echo "[ERROR] Tailscale requested but TAILSCALE_AUTH_KEY is empty" >&2
+        echo "        (not needed when TAILSCALE_MODE=host — this host would reuse its own node)" >&2
+        exit 1
+      fi
+      if [[ ! "$TAILSCALE_AUTH_KEY" =~ ^tskey-auth- ]]; then
+        echo "[ERROR] TAILSCALE_AUTH_KEY must start with 'tskey-auth-'" >&2
+        exit 1
+      fi
+    fi
+  fi
+  echo "[INFO] Credentials taken from the environment; broker passwords generated locally."
+else
 
 echo "Hummingbot API Setup"
 echo ""
@@ -458,34 +599,83 @@ CONFIG_PASSWORD="$(prompt_required_secret_tty "Config password: ")"
 # --------------------------
 # Tailscale Configuration
 # --------------------------
-TAILSCALE_ENABLED=false
-TAILSCALE_AUTH_KEY=""
-TAILSCALE_HOSTNAME="hummingbot-api"
 
 if prompt_yes_no "Use Tailscale for secure private networking? [y/N]: " "n"; then
-  echo ""
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "  How to get a Tailscale auth key:"
-  echo "    1. Create a free account at https://tailscale.com"
-  echo "    2. Go to: https://tailscale.com/admin/settings/keys"
-  echo "    3. Click 'Generate auth key'"
-  echo "    4. Check 'Reusable' for multiple server deployments"
-  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo ""
-  while true; do
-    TAILSCALE_AUTH_KEY="$(prompt_tty "Tailscale auth key (tskey-auth-...): " "")"
-    if [[ -z "$TAILSCALE_AUTH_KEY" ]]; then
-      echo "[WARN] Auth key cannot be empty"
-      continue
-    fi
-    if [[ ! "$TAILSCALE_AUTH_KEY" =~ ^tskey-auth- ]]; then
-      echo "[WARN] Auth key must start with 'tskey-auth-'"
-      continue
-    fi
-    break
-  done
-  # Hostname defaults to "hummingbot-api" — override via TAILSCALE_HOSTNAME in .env if needed
   TAILSCALE_ENABLED=true
+  # Ask what the answer depends on before asking for an auth key. A machine
+  # that already runs tailscaled needs no key -- it is on the tailnet, and
+  # joining a second time from the same host would only contend for the same
+  # device. Prompting anyway would demand a credential to do something we are
+  # about to decide not to do.
+  # shellcheck source=tailnet-state.sh
+  . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tailnet-state.sh"
+  if [ "$(tailnet_state)" != none ]; then
+    TAILSCALE_MODE=host
+    echo ""
+    echo "[OK] This machine is already on a tailnet — no auth key needed."
+    echo "     Port 8000 will be served on the node it already has."
+    echo "     Want the API to have its own tailnet identity instead?"
+    echo "     Set TAILSCALE_MODE=sidecar and TAILSCALE_AUTH_KEY in .env, then 'make deploy'."
+  else
+    TAILSCALE_MODE=sidecar
+    echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  How to get a Tailscale auth key:"
+    echo "    1. Create a free account at https://tailscale.com"
+    echo "    2. Go to: https://tailscale.com/admin/settings/keys"
+    echo "    3. Click 'Generate auth key'"
+    echo "    4. Check 'Reusable' for multiple server deployments"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
+    while true; do
+      TAILSCALE_AUTH_KEY="$(prompt_tty "Tailscale auth key (tskey-auth-...): " "")"
+      if [[ -z "$TAILSCALE_AUTH_KEY" ]]; then
+        echo "[WARN] Auth key cannot be empty"
+        continue
+      fi
+      if [[ ! "$TAILSCALE_AUTH_KEY" =~ ^tskey-auth- ]]; then
+        echo "[WARN] Auth key must start with 'tskey-auth-'"
+        continue
+      fi
+      break
+    done
+    # Hostname defaults to "hummingbot-api" — override via TAILSCALE_HOSTNAME in .env if needed
+  fi
+fi
+
+fi  # end interactive / non-interactive split
+
+# --------------------------
+# Tailnet ownership
+# --------------------------
+# Recorded in .env as a preference; `make deploy` re-resolves it against the
+# live host on every run, so this is a starting point, not a guarantee.
+_setup_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=tailnet-state.sh
+. "$_setup_here/tailnet-state.sh"
+
+if [ "$TAILSCALE_ENABLED" != true ]; then
+  TAILSCALE_MODE=none
+elif [ -n "${TAILSCALE_MODE:-}" ]; then
+  : # caller was explicit (validated earlier); respect it
+else
+  case "$(tailnet_state)" in
+    native)
+      TAILSCALE_MODE=host
+      echo ""
+      echo "[INFO] This machine is already on a tailnet."
+      echo "[INFO] Port 8000 will be served on the node it already has, rather than"
+      echo "[INFO] joining a second time — two daemons cannot share one tailnet device."
+      echo "[INFO] Want a separate identity anyway? Set TAILSCALE_MODE=sidecar in .env."
+      ;;
+    sidecar)
+      TAILSCALE_MODE=sidecar
+      echo "[INFO] Reusing the existing hummingbot-tailscale sidecar."
+      ;;
+    *)
+      TAILSCALE_MODE=sidecar
+      ;;
+  esac
 fi
 
 # Broker credentials are never typed by the user — the API and the bots are the only clients —
@@ -553,10 +743,116 @@ AOMI_LENDING_POLICY_FILE=
 BOTS_PATH=$(pwd)
 
 # Tailscale
+# TAILSCALE_ENABLED is the switch and keeps its historical meaning.
+# TAILSCALE_MODE says HOW: host = share this machine's existing tailnet node,
+# sidecar = give the API a node of its own. Deploy re-resolves this against
+# the live host every time, so an .env that was right in June cannot put a
+# second kernel-mode daemon on a box that grew one in July.
+#
+# NOTE: this heredoc is unquoted so plain variables expand. Command
+# substitution in these comments would EXECUTE while .env is written -- a
+# backtick here once ran a make target mid-setup and seeded the broker with
+# the wrong password. Keep substitution out of the comments.
 TAILSCALE_ENABLED=$TAILSCALE_ENABLED
+TAILSCALE_MODE=$TAILSCALE_MODE
 TAILSCALE_AUTH_KEY=$TAILSCALE_AUTH_KEY
 TAILSCALE_HOSTNAME=$TAILSCALE_HOSTNAME
+
+# ---------------------------------------------------------------------------
+# Optional settings. Every line below is commented out and shows the default
+# that config.py already applies -- config.py stays the source of truth, so
+# uncomment a line only to override it.
+# ---------------------------------------------------------------------------
+
+# Performance snapshots
+# How often a live executor's performance is snapshotted, in seconds.
+#PERFORMANCE_EXECUTOR_SNAPSHOT_INTERVAL=60
+# Delete performance snapshots (executor AND controller) older than this many
+# days. 0 keeps everything forever -- raise it to cap database growth.
+#PERFORMANCE_RETENTION_DAYS=0
+
+# Backtesting
+# How many backtests may run at once; further submissions queue. Runs are
+# isolated in separate processes, so this can be raised up to the cores you are
+# willing to give them.
+#BACKTESTING_MAX_CONCURRENT=1
+# Wall-clock budget for one backtest; the worker is killed and the task fails past it.
+#BACKTESTING_TIMEOUT_SECONDS=1800.0
+# How many finished backtests to retain before the oldest are reaped.
+#BACKTESTING_MAX_RESULTS=100
+# Directory holding archived backtest payloads (inside the bots volume, so it
+# survives redeploys).
+#BACKTESTING_RESULTS_PATH=bots/data/backtests
+# Directory holding downloaded candle history shared by backtest workers, so a
+# sweep of configs over one market downloads that market once.
+#BACKTESTING_CANDLES_CACHE_PATH=bots/data/backtests/candles
+# How many downloaded candle ranges to keep; the least recently used are dropped
+# past it. 0 disables the cache and makes every run download its own history.
+#BACKTESTING_CANDLES_CACHE_ENTRIES=32
+# How long a downloaded candle range may be reused. A window ending near now is
+# fetched with its last candle still forming, so an entry is refetched once it is
+# older than this.
+#BACKTESTING_CANDLES_CACHE_TTL_SECONDS=3600.0
+
+# Market data feeds
+# How often to run feed cleanup, in seconds.
+#MARKET_DATA_CLEANUP_INTERVAL=300
+# How long to keep unused feeds alive, in seconds.
+#MARKET_DATA_FEED_TIMEOUT=600
+# How long to wait for a candle feed to become ready, in seconds.
+#MARKET_DATA_CANDLES_READY_TIMEOUT=30
+# WebSocket heartbeat interval, in seconds.
+#MARKET_DATA_WS_HEARTBEAT_INTERVAL=30
+# Allowed range for a market-data WebSocket subscription update interval, in seconds.
+#MARKET_DATA_WS_MIN_UPDATE_INTERVAL=0.25
+#MARKET_DATA_WS_MAX_UPDATE_INTERVAL=60.0
+# Allowed range, and the applied default, for a /ws/executors subscription
+# update interval, in seconds. The floor is stricter than the market-data one
+# because executor push loops hit the database instead of reading in-memory
+# candles and order books.
+#MARKET_DATA_WS_EXECUTOR_MIN_UPDATE_INTERVAL=0.5
+#MARKET_DATA_WS_EXECUTOR_MAX_UPDATE_INTERVAL=60.0
+#MARKET_DATA_WS_EXECUTOR_DEFAULT_UPDATE_INTERVAL=2.0
+# How often to refresh tickers from connected exchanges, in seconds.
+#MARKET_DATA_TICKER_UPDATE_INTERVAL=30
+# Max age of cached tickers before an on-demand request refetches them, in seconds.
+#MARKET_DATA_TICKER_MAX_AGE=60
+# How long a ticker-only connector stays in the background refresh cycle after
+# its last request, in seconds.
+#MARKET_DATA_TICKER_SUBSCRIPTION_TTL=600
+# How often to refresh Hyperliquid HIP-3 (builder-deployed perp dex) tickers, in
+# seconds. Set to 0 to exclude HIP-3 markets.
+#MARKET_DATA_HYPERLIQUID_HIP3_INTERVAL=120
+
+# CORS (SEC-019). A wildcard origin must never be combined with credentials, so
+# trusted origins are restricted to localhost by default.
+# Explicit list of trusted origins, as JSON, e.g. ["https://dashboard.example.com"]
+#CORS_ALLOW_ORIGINS=[]
+# Regex matching trusted origins; an empty string disables regex matching.
+#CORS_ALLOW_ORIGIN_REGEX=https?://(localhost|127\.0\.0\.1)(:\d+)?
+# Allow credentialed (cookies/auth) cross-origin requests.
+#CORS_ALLOW_CREDENTIALS=true
+# HTTP methods and headers allowed for cross-origin requests.
+#CORS_ALLOW_METHODS=["*"]
+#CORS_ALLOW_HEADERS=["*"]
+
+# AWS (only needed for S3 archiving)
+#AWS_API_KEY=
+#AWS_SECRET_KEY=
+#AWS_S3_DEFAULT_BUCKET_NAME=
 EOF
+
+# Appended rather than templated: these are the caller's tuning, not this
+# repo's defaults, and an install that did not ask for them should not carry
+# them at all.
+if [ -n "$_env_bt_concurrent" ] || [ -n "$_env_bt_timeout" ]; then
+  {
+    echo ""
+    echo "# Backtesting (set by the installer that drove this setup)"
+    [ -n "$_env_bt_concurrent" ] && echo "BACKTESTING_MAX_CONCURRENT=$_env_bt_concurrent"
+    [ -n "$_env_bt_timeout" ] && echo "BACKTESTING_TIMEOUT_SECONDS=$_env_bt_timeout"
+  } >> .env
+fi
 
 # Holds the API password, the config/Gateway passphrase and (when set) a
 # Tailscale auth key. The usual 644 umask makes all of that readable by every
@@ -582,9 +878,30 @@ echo "  make doctor    # Verifies dependencies, .env, containers, port exposure 
 if [ "$TAILSCALE_ENABLED" = true ]; then
   echo ""
   echo "Tailscale:"
-  echo "  Docker deploy:  Tailscale sidecar starts automatically with 'make deploy'"
-  echo "  Source run:     Tailscale installs and connects automatically with 'make run'"
-  echo "  Condor URL:     http://$TAILSCALE_HOSTNAME:8000"
+  # Say what THIS mode will do. In host mode no sidecar starts and no node by
+  # that name ever registers, so the sidecar summary described a deployment
+  # that was not about to happen.
+  if [ "$TAILSCALE_MODE" = host ]; then
+    echo "  Mode:           host — port 8000 is served on the tailnet node this machine already has"
+    _ts_name="$(tailnet_node_name 2>/dev/null || true)"
+    if [ -n "$_ts_name" ]; then
+      echo "  Condor URL:     http://$_ts_name:8000"
+    else
+      echo "  Condor URL:     run 'make doctor' after 'make deploy' — it prints this node's name"
+    fi
+  else
+    echo "  Mode:           sidecar — the API gets a tailnet node of its own"
+    echo "  Docker deploy:  Tailscale sidecar starts automatically with 'make deploy'"
+    echo "  Source run:     Tailscale installs and connects automatically with 'make run'"
+    # Deliberately NOT printed as a settled URL. The node does not exist yet,
+    # and Tailscale suffixes a hostname that is already taken -- ask for
+    # "hummingbot-api" on a tailnet that has one and you get
+    # "hummingbot-api-1". Printing the requested name as the URL is how an
+    # install ends up pointed at somebody else's machine.
+    echo "  Condor URL:     http://$TAILSCALE_HOSTNAME:8000 — unless that name is already taken on"
+    echo "                  your tailnet, in which case this node registers as"
+    echo "                  $TAILSCALE_HOSTNAME-1, -2, ... 'make doctor' prints the real one."
+  fi
   echo "  Status:         make tailscale-status"
 fi
 echo ""

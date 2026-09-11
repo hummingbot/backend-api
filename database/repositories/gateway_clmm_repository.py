@@ -2,10 +2,13 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Dict, List, Optional, Set
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import GatewayCLMMEvent, GatewayCLMMPosition
+
+# The event types whose gas_token the pre-ARCH-054 write paths damaged.
+LIQUIDITY_EVENT_TYPES = ("ADD_LIQUIDITY", "REMOVE_LIQUIDITY")
 
 
 class GatewayCLMMRepository:
@@ -370,6 +373,66 @@ class GatewayCLMMRepository:
 
         result = await self.session.execute(query)
         return result.scalars().all()
+
+    async def backfill_liquidity_gas_tokens(self) -> Dict:
+        """Repair gas_token on liquidity events written before ARCH-054 unified the chain map.
+
+        Two write paths damaged these rows and neither will revisit them: the add/remove
+        handlers' two-branch ternary wrote gas_token NULL off solana/ethereum, and a row
+        inserted CONFIRMED is never re-polled, so that NULL is permanent; the poller's old
+        6-entry dict wrote "UNKNOWN" for base, arbitrum and polygon. The write paths are
+        fixed, the historical rows are not, and every cost report reading them is wrong.
+
+        Only rows that actually recorded a gas fee are repaired: with no fee there is no
+        currency to name, which is exactly what the routes persist today
+        (``get_native_gas_token(chain) if gas_fee is not None else None``). The chain comes
+        from the position's ``network`` ("solana-mainnet-beta" -> "solana") and is resolved
+        through ``get_native_gas_token`` — the single source ARCH-054 established, never a
+        second copy of the map. A chain that still resolves to "UNKNOWN" is left untouched
+        and counted, so an unmapped chain surfaces instead of being papered over.
+
+        Idempotent: a repaired row no longer matches the NULL/"UNKNOWN" filter, so a second
+        run fixes nothing and changes nothing.
+
+        Returns:
+            {"fixed": int, "unresolved": int, "unresolved_networks": List[str]}
+        """
+        # Imported here, not at module scope: `services/__init__` imports back into
+        # `database`, so a top-level import of it from a repository is a cycle.
+        from services.gateway_client import get_native_gas_token
+
+        query = (
+            select(GatewayCLMMEvent, GatewayCLMMPosition.network)
+            .join(GatewayCLMMPosition, GatewayCLMMEvent.position_id == GatewayCLMMPosition.id)
+            .where(
+                GatewayCLMMEvent.event_type.in_(LIQUIDITY_EVENT_TYPES),
+                GatewayCLMMEvent.gas_fee.isnot(None),
+                or_(GatewayCLMMEvent.gas_token.is_(None), GatewayCLMMEvent.gas_token == "UNKNOWN"),
+            )
+        )
+        result = await self.session.execute(query)
+
+        fixed = 0
+        unresolved = 0
+        unresolved_networks: Set[str] = set()
+        for event, network in result.all():
+            chain = (network or "").split("-", 1)[0]
+            gas_token = get_native_gas_token(chain)
+            if gas_token == "UNKNOWN":
+                unresolved += 1
+                unresolved_networks.add(network)
+                continue
+            event.gas_token = gas_token
+            fixed += 1
+
+        if fixed:
+            await self.session.flush()
+
+        return {
+            "fixed": fixed,
+            "unresolved": unresolved,
+            "unresolved_networks": sorted(unresolved_networks),
+        }
 
     async def get_pending_events(self, limit: int = 100) -> List[GatewayCLMMEvent]:
         """Get events that are still pending confirmation."""

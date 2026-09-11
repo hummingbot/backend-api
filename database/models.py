@@ -1,4 +1,4 @@
-from sqlalchemy import TIMESTAMP, Column, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import TIMESTAMP, Boolean, Column, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 
@@ -451,6 +451,52 @@ class ControllerPerformanceSnapshot(Base):
     status = Column(String, nullable=False)  # running, error, stopped
     performance = Column(Text, nullable=True)  # JSON dict of performance metrics
     custom_info = Column(Text, nullable=True)  # JSON dict of custom info
+
+
+class ExecutorPerformanceSnapshot(Base):
+    """Periodic snapshot of a live executor's performance, plus one terminal row.
+
+    Written by ExecutorService: on the snapshot tick for everything in
+    _active_executors, and once more at completion with is_terminal=True. The terminal
+    row is what makes a closed executor's series answerable from this table alone --
+    no join to ExecutorRecord, and no exposure to the two paths that leave that record's
+    metrics at their creation-time zeros (the startup reap, and the except branch in
+    _persist_executor_completed).
+
+    Deliberately narrow and typed, unlike controller_performance_snapshots: ExecutorInfo
+    is named field by field all over this repo, while the controller's PerformanceReport
+    is versioned by the core and has to be blobbed. Typing it also keeps the heavy
+    custom_info payloads (fill_events, levels_by_state, ...) out of a per-minute row.
+    """
+    __tablename__ = "executor_performance_snapshots"
+    __table_args__ = (
+        # The hot query is WHERE executor_id = ? ORDER BY timestamp DESC -- one executor's
+        # series, which is what both the history route and the reap lookup ask for.
+        Index("ix_exec_perf_executor_timestamp", "executor_id", "timestamp"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(TIMESTAMP(timezone=True), server_default=func.now(), nullable=False, index=True)
+
+    # Identity, denormalized from ExecutorRecord so a series needs no join.
+    executor_id = Column(String, nullable=False, index=True)
+    executor_type = Column(String, nullable=False, index=True)
+    account_name = Column(String, nullable=False, index=True)
+    connector_name = Column(String, nullable=False)
+    trading_pair = Column(String, nullable=False)
+    controller_id = Column(String, nullable=False, default="main", index=True)
+
+    status = Column(String, nullable=False)  # RunnableStatus name
+    close_type = Column(String, nullable=True)  # only ever set on the terminal row
+    is_terminal = Column(Boolean, nullable=False, default=False, index=True)
+
+    # The four ExecutorInfo metrics, same precision as ExecutorRecord. There is NO
+    # separate volume column: filled_amount_quote IS the volume traded, on every executor
+    # type including LP -- see test_executor_volume_is_the_filled_amount.py.
+    net_pnl_quote = Column(Numeric(precision=30, scale=18), nullable=False, default=0)
+    net_pnl_pct = Column(Numeric(precision=10, scale=6), nullable=False, default=0)
+    cum_fees_quote = Column(Numeric(precision=30, scale=18), nullable=False, default=0)
+    filled_amount_quote = Column(Numeric(precision=30, scale=18), nullable=False, default=0)
 
 
 class ExecutorRecord(Base):

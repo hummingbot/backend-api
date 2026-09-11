@@ -17,6 +17,12 @@ set -uo pipefail
 
 cd "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || exit 1
 
+# Kept in step with the Makefile's EMQX_AUTH_FILE.
+EMQX_BOOTSTRAP=".emqx/auth-bootstrap.csv"
+# Defaults so `set -u` holds when there is no .env to read them from.
+BROKER_PASSWORD=""
+TS_ENABLED=""
+
 # ── Palette ──────────────────────────────────────────
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -190,6 +196,7 @@ else
     TS_ENABLED="$(env_get TAILSCALE_ENABLED)"
     TS_HOSTNAME="$(env_get TAILSCALE_HOSTNAME)"
     BIND_HOST="$(env_get API_BIND)"
+    BROKER_PASSWORD="$(env_get BROKER_PASSWORD)"
     GATEWAY_PASSPHRASE="$(env_get GATEWAY_PASSPHRASE)"
 
     # Credentials that used to be shipped as defaults. This API can place
@@ -229,7 +236,17 @@ else
     # is enabled, so unset is always the safe case here -- only an explicit,
     # wider value is worth a second look.
     if [ -z "$BIND_HOST" ] || [ "$BIND_HOST" = "127.0.0.1" ]; then
-        row ok "API_BIND" "127.0.0.1 (default) — port 8000 is loopback-only"
+        # Loopback is right, and it is also the reason a Condor on ANOTHER
+        # machine cannot reach this API. Nothing in either installer says so at
+        # the point that choice is made, and the symptom -- a connection that
+        # times out from the other box while everything here reports healthy --
+        # does not point at a bind address. Say it here, where someone is
+        # already looking for the answer.
+        if [ "$TS_ENABLED" = "true" ]; then
+            row ok "API_BIND" "127.0.0.1 (default) — port 8000 is loopback-only, and reaches the tailnet via tailscale serve"
+        else
+            row ok "API_BIND" "127.0.0.1 (default) — port 8000 is loopback-only. Only this machine can reach the API; a Condor running elsewhere needs Tailscale, an SSH tunnel, or an explicit API_BIND here"
+        fi
     elif [ "$TS_ENABLED" = "true" ] && is_tailscale_ip "$BIND_HOST"; then
         row ok "API_BIND" "$BIND_HOST looks like a tailscale IP — the documented way to expose 8000 on the tailnet without the sidecar"
     elif [ "$TS_ENABLED" = "true" ]; then
@@ -267,6 +284,31 @@ else
             row fail "$label" "container $cname is not running — the API needs it; \`make deploy\`, or \`docker compose up emqx postgres -d\` for a source run"
         fi
     done
+
+    # The broker's accounts come from this file, and EMQX imports it only at
+    # first start. Three ways it goes wrong, all of which leave a broker that
+    # is "healthy" with authentication enabled and NO accounts -- every MQTT
+    # connection refused while the API's HTTP health check still passes:
+    #
+    #   missing    -- deployed with plain `docker compose up` instead of
+    #                 `make deploy`, so the emqx-auth prerequisite never ran
+    #   directory  -- same, but Docker then created the absent bind-mount
+    #                 source as a root-owned directory, which also blocks the
+    #                 `make emqx-auth` that would have fixed it
+    #   stale      -- .env was rewritten afterwards, so the password the API
+    #                 uses no longer matches the one the broker was seeded with
+    if [ -d "$EMQX_BOOTSTRAP" ]; then
+        row fail "Broker accounts" "$EMQX_BOOTSTRAP is a DIRECTORY, not a file — Docker created it because the file was missing at deploy time. EMQX imported no accounts and will refuse every connection. Fix: sudo rm -rf $EMQX_BOOTSTRAP && make deploy"
+    elif [ ! -f "$EMQX_BOOTSTRAP" ]; then
+        row fail "Broker accounts" "$EMQX_BOOTSTRAP is missing — the broker was started without \`make emqx-auth\`, so it has no accounts and will refuse every connection. Fix: make deploy"
+    else
+        csv_pass="$(awk -F, 'NR==2{print $2}' "$EMQX_BOOTSTRAP" 2>/dev/null)"
+        if [ -n "$BROKER_PASSWORD" ] && [ "$csv_pass" != "$BROKER_PASSWORD" ]; then
+            row fail "Broker accounts" "$EMQX_BOOTSTRAP does not match BROKER_PASSWORD in .env — the API authenticates with one password against a broker seeded with another. Re-seeding needs the volume dropped: make emqx-auth-reset"
+        else
+            row ok "Broker accounts" "bootstrap file present and matches .env"
+        fi
+    fi
 fi
 
 echo ""
@@ -330,33 +372,98 @@ section "Tailscale"
 if [ "${TS_ENABLED:-}" != "true" ]; then
     row ok "Tailscale" "not enabled (TAILSCALE_ENABLED is not true)"
 else
-    TS_EXEC=""
-    if container_running hummingbot-tailscale; then
-        TS_EXEC="docker exec hummingbot-tailscale tailscale"
-        row ok "Sidecar" "hummingbot-tailscale container is running"
-    elif has_cmd tailscale; then
-        TS_EXEC="tailscale"
-        row ok "Client" "installed locally"
-    else
-        row fail "Tailscale" "TAILSCALE_ENABLED=true but neither the sidecar container nor a local tailscale client is present — \`make deploy\` (Docker) or \`make run\` (source)"
+    # Report against the mode actually in force, resolved the same way
+    # `make deploy` resolves it -- .env records a preference, the live host
+    # decides. Reporting "check tailscale-serve.json is mounted" at someone
+    # running host mode, which has no sidecar and no serve JSON, is worse than
+    # saying nothing.
+    # shellcheck source=tailnet-state.sh
+    . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/tailnet-state.sh"
+    # tailnet_mode reads the ENVIRONMENT; doctor deliberately never sources
+    # .env (a password containing shell metacharacters is enough to break
+    # that), so hand it the values env_get already parsed. Without this it
+    # sees nothing set and reports every install as the default mode.
+    # A rejected TAILSCALE_MODE must be reported as the error it is. Falling
+    # back to a default here would show a mode the deploy is going to refuse
+    # to run, sending someone to debug the wrong thing.
+    if ! TS_MODE="$(
+        export TAILSCALE_MODE="$(env_get TAILSCALE_MODE)" TAILSCALE_ENABLED="$TS_ENABLED"
+        tailnet_mode 2>/dev/null
+    )"; then
+        TS_MODE=""
     fi
 
-    if [ -n "$TS_EXEC" ]; then
-        if ts_status="$($TS_EXEC status 2>&1)"; then
-            row ok "Tailnet" "$(printf '%s' "$ts_status" | grep -v '^[[:space:]]*$' | head -1)"
+    if [ -z "$TS_MODE" ]; then
+        row fail "Mode" "TAILSCALE_MODE=$(env_get TAILSCALE_MODE) is not one of none, host or sidecar — \`make deploy\` will refuse to run until this is corrected in .env"
+    elif [ "$TS_MODE" = none ]; then
+        row warn "Mode" "TAILSCALE_ENABLED=true but TAILSCALE_MODE=none — nothing will put the API on the tailnet. Set TAILSCALE_MODE to host or sidecar, or TAILSCALE_ENABLED=false"
+    elif [ "$TS_MODE" = host ]; then
+        row ok "Mode" "host — served on this machine's existing tailnet node"
+        if has_cmd tailscale; then
+            if ts_status="$(tailscale status 2>&1)"; then
+                row ok "Tailnet" "$(printf '%s' "$ts_status" | grep -v '^[[:space:]]*$' | head -1)"
+            else
+                row fail "Tailnet" "this host's tailscaled is not connected — \`sudo tailscale up\`"
+            fi
+            if [ -n "$BIND_HOST" ] && is_tailscale_ip "$BIND_HOST"; then
+                row ok "Serve (port 8000)" "skipped — API_BIND=$BIND_HOST binds the API directly"
+            elif ts_serve="$(tailscale serve status 2>&1)" && printf '%s' "$ts_serve" | grep -q "8000"; then
+                _ts_name="$(tailnet_node_name || true)"
+                row ok "Serve (port 8000)" "forwarded to 127.0.0.1:8000${_ts_name:+ — reachable on the tailnet as http://$_ts_name:8000}"
+            else
+                row fail "Serve (port 8000)" "port 8000 is not forwarded, so nothing on the tailnet can reach the API. Run: sudo tailscale serve --bg --tcp=8000 tcp://127.0.0.1:8000"
+            fi
         else
-            row fail "Tailnet" "not connected — check TAILSCALE_AUTH_KEY (keys expire) and re-run \`make deploy\`"
+            row fail "Tailscale" "mode=host but no tailscale client on PATH — install it, or set TAILSCALE_MODE=sidecar to give the API its own node"
         fi
-        # Joining the tailnet is not the same as being reachable on it: with
-        # API_BIND left at its 127.0.0.1 default, TS_SERVE_CONFIG (tailscale
-        # serve) is what forwards the tailnet's :8000 to the loopback bind --
-        # skip this check if API_BIND is set directly to a tailscale IP instead.
-        if [ -n "$BIND_HOST" ] && is_tailscale_ip "$BIND_HOST"; then
-            row ok "Serve (port 8000)" "skipped — API_BIND=$BIND_HOST binds the API directly, without relying on tailscale serve"
-        elif ts_serve="$($TS_EXEC serve status 2>&1)" && printf '%s' "$ts_serve" | grep -q "8000"; then
-            row ok "Serve (port 8000)" "proxied to the tailnet as http://${TS_HOSTNAME:-hummingbot-api}:8000"
+    else
+        row ok "Mode" "sidecar — the API has its own tailnet node"
+        TS_EXEC=""
+        if container_running hummingbot-tailscale; then
+            TS_EXEC="docker exec hummingbot-tailscale tailscale"
+            row ok "Sidecar" "hummingbot-tailscale container is running"
+        elif has_cmd tailscale; then
+            TS_EXEC="tailscale"
+            row ok "Client" "installed locally"
         else
-            row fail "Serve (port 8000)" "the node is on the tailnet but port 8000 is not proxied — with API_BIND=127.0.0.1 nothing can reach the API at all. Check tailscale-serve.json is mounted, then \`make deploy\`"
+            row fail "Tailscale" "TAILSCALE_ENABLED=true but neither the sidecar container nor a local tailscale client is present — \`make deploy\` (Docker) or \`make run\` (source)"
+        fi
+
+        if [ -n "$TS_EXEC" ]; then
+            if ts_status="$($TS_EXEC status 2>&1)"; then
+                row ok "Tailnet" "$(printf '%s' "$ts_status" | grep -v '^[[:space:]]*$' | head -1)"
+            elif container_running hummingbot-tailscale && tailnet_has_native; then
+                # A container that is "running" while its daemon is dead is the
+                # signature of two kernel-mode tailscaled contending for one
+                # tailscale0: the loser exits with "device or resource busy",
+                # containerboot stays up, restart:unless-stopped never fires.
+                # Blaming the auth key here sent people to reissue a key that
+                # was never the problem.
+                row fail "Tailnet" "the sidecar container is up but its daemon is not — another tailscaled already owns this host's tailscale0. Set TAILSCALE_MODE=host, or re-run \`make deploy\`, which starts the sidecar in userspace mode when a native daemon is present"
+            else
+                row fail "Tailnet" "not connected — check TAILSCALE_AUTH_KEY (keys expire) and re-run \`make deploy\`"
+            fi
+            # Joining the tailnet is not the same as being reachable on it: with
+            # API_BIND left at its 127.0.0.1 default, TS_SERVE_CONFIG (tailscale
+            # serve) is what forwards the tailnet's :8000 to the loopback bind --
+            # skip this check if API_BIND is set directly to a tailscale IP instead.
+            if [ -n "$BIND_HOST" ] && is_tailscale_ip "$BIND_HOST"; then
+                row ok "Serve (port 8000)" "skipped — API_BIND=$BIND_HOST binds the API directly, without relying on tailscale serve"
+            elif ts_serve="$($TS_EXEC serve status 2>&1)" && printf '%s' "$ts_serve" | grep -q "8000"; then
+                # The name the node ACTUALLY got, not the one .env asked for.
+                # Tailscale suffixes a taken hostname, so on a shared tailnet
+                # that already has a "hummingbot-api" this node is
+                # "hummingbot-api-1" -- and printing the requested name here
+                # sends people to a machine that is not this one.
+                _ts_name="$(tailnet_node_name $TS_EXEC || true)"
+                if [ -n "$_ts_name" ] && [ "$_ts_name" != "${TS_HOSTNAME:-hummingbot-api}" ]; then
+                    row ok "Serve (port 8000)" "proxied to the tailnet as http://$_ts_name:8000 (TAILSCALE_HOSTNAME asked for '${TS_HOSTNAME:-hummingbot-api}'; that name was already taken on this tailnet, so use the one above)"
+                else
+                    row ok "Serve (port 8000)" "proxied to the tailnet as http://${_ts_name:-${TS_HOSTNAME:-hummingbot-api}}:8000"
+                fi
+            else
+                row fail "Serve (port 8000)" "the node is on the tailnet but port 8000 is not proxied — with API_BIND=127.0.0.1 nothing can reach the API at all. Check tailscale-serve.json is mounted, then \`make deploy\`"
+            fi
         fi
     fi
 fi

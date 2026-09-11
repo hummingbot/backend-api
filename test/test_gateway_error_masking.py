@@ -5,7 +5,7 @@ GatewayClient._request returns {"error": <str>, "status": <int>} on non-OK HTTP.
 These tests pin the three places where treating that shape as data caused real
 damage (found in the 2026-07-13 audit):
 - /gateway/swap/quote rendered a Gateway 404 as a 200 quote with price "0",
-- _refresh_position_data marked positions CLOSED in the DB on any Gateway error,
+- refresh_position_data marked positions CLOSED in the DB on any Gateway error,
 - the transaction poller recorded transient Gateway errors as on-chain FAILED.
 
 Run with: pytest test/test_gateway_error_masking.py -v
@@ -80,7 +80,7 @@ def test_swap_quote_gateway_unreachable_is_503(swap_app):
 
 
 # ============================================
-# _refresh_position_data must not close positions on Gateway errors
+# refresh_position_data must not close positions on Gateway errors
 # ============================================
 
 def _position():
@@ -95,7 +95,7 @@ def _position():
 
 @pytest.mark.asyncio
 async def test_refresh_does_not_close_position_on_gateway_error():
-    from routers.gateway_clmm import _refresh_position_data
+    from services.gateway_clmm_service import refresh_position_data
 
     accounts_service = _mock_accounts_service(clmm_positions_owned=ERROR_DICT)
     clmm_repo = SimpleNamespace(
@@ -104,7 +104,7 @@ async def test_refresh_does_not_close_position_on_gateway_error():
         update_position_fees=AsyncMock(),
     )
 
-    await _refresh_position_data(_position(), accounts_service, clmm_repo)
+    await refresh_position_data(_position(), accounts_service.gateway_client, clmm_repo)
     clmm_repo.close_position.assert_not_awaited()
 
 
@@ -113,7 +113,7 @@ async def test_refresh_skips_position_missing_from_valid_list():
     """Absence from ONE positions-owned read is not proof of closure (RPC lag):
     the refresh skips the update and leaves close detection to the poller's
     consecutive-miss gate — a single read must never close a live position."""
-    from routers.gateway_clmm import _refresh_position_data
+    from services.gateway_clmm_service import refresh_position_data
 
     accounts_service = _mock_accounts_service(clmm_positions_owned=[{"address": "OTHER"}])
     clmm_repo = SimpleNamespace(
@@ -122,7 +122,7 @@ async def test_refresh_skips_position_missing_from_valid_list():
         update_position_fees=AsyncMock(),
     )
 
-    await _refresh_position_data(_position(), accounts_service, clmm_repo)
+    await refresh_position_data(_position(), accounts_service.gateway_client, clmm_repo)
     clmm_repo.close_position.assert_not_awaited()
     clmm_repo.update_position_liquidity.assert_not_awaited()
 

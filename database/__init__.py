@@ -4,6 +4,7 @@ from .models import (
     Base,
     BotRun,
     ControllerPerformanceSnapshot,
+    ExecutorPerformanceSnapshot,
     FundingPayment,
     GatewayCLMMEvent,
     GatewayCLMMPosition,
@@ -17,6 +18,7 @@ from .repositories import (
     AccountRepository,
     BotRunRepository,
     ControllerPerformanceRepository,
+    ExecutorPerformanceRepository,
     ExecutorRepository,
     FundingRepository,
     GatewayCLMMRepository,
@@ -28,10 +30,10 @@ from .repositories import (
 __all__ = [
     "AccountState", "TokenState", "Order", "Trade", "PositionSnapshot", "FundingPayment", "BotRun",
     "GatewaySwap", "GatewayCLMMPosition", "GatewayCLMMEvent",
-    "ControllerPerformanceSnapshot",
+    "ControllerPerformanceSnapshot", "ExecutorPerformanceSnapshot",
     "Base", "AsyncDatabaseManager",
     "AccountRepository", "BotRunRepository", "ControllerPerformanceRepository",
-    "ExecutorRepository",
+    "ExecutorPerformanceRepository", "ExecutorRepository",
     "OrderRepository", "TradeRepository", "FundingRepository",
     "GatewaySwapRepository", "GatewayCLMMRepository"
 ]

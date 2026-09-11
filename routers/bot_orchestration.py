@@ -417,44 +417,28 @@ async def stop_and_archive_bot(
     Returns immediately with a success message while the process continues in the background.
     """
     try:
-        # Step 1: Normalize bot name and container name
-        # Container name is now the same as bot name (no prefix added)
-        actual_bot_name = bot_name
-        container_name = bot_name
-
-        logging.info(f"Normalized bot_name: {actual_bot_name}, container_name: {container_name}")
-
-        # Step 2: Validate bot exists in active bots
+        # The bot name is also the container name and the MQTT identity, so it is
+        # used verbatim everywhere below (no "hummingbot-" prefix is added anywhere).
         active_bots = list(bots_manager.active_bots.keys())
 
-        # Check if bot exists in active bots (could be stored as either format)
-        bot_found = (actual_bot_name in active_bots) or (container_name in active_bots)
-
-        if not bot_found:
+        if bot_name not in active_bots:
             return {
                 "status": "error",
                 "message": (
-                    f"Bot '{actual_bot_name}' not found in active bots. "
+                    f"Bot '{bot_name}' not found in active bots. "
                     f"Active bots: {active_bots}. Cannot perform graceful shutdown."
                 ),
                 "details": {
-                    "input_name": bot_name,
-                    "actual_bot_name": actual_bot_name,
-                    "container_name": container_name,
+                    "bot_name": bot_name,
                     "active_bots": active_bots,
                     "reason": "Bot must be actively managed via MQTT for graceful shutdown"
                 }
             }
 
-        # Use the format that's actually stored in active bots
-        bot_name_for_orchestrator = container_name if container_name in active_bots else actual_bot_name
-
         # Add the background task
         background_tasks.add_task(
             bots_manager.stop_and_archive_bot,
-            bot_name=actual_bot_name,
-            container_name=container_name,
-            bot_name_for_orchestrator=bot_name_for_orchestrator,
+            bot_name=bot_name,
             skip_order_cancellation=skip_order_cancellation,
             archive_locally=archive_locally,
             s3_bucket=s3_bucket,
@@ -464,11 +448,9 @@ async def stop_and_archive_bot(
 
         return {
             "status": "success",
-            "message": f"Stop and archive process started for bot {actual_bot_name}",
+            "message": f"Stop and archive process started for bot {bot_name}",
             "details": {
-                "input_name": bot_name,
-                "actual_bot_name": actual_bot_name,
-                "container_name": container_name,
+                "bot_name": bot_name,
                 "process": (
                     "The bot will be gracefully stopped, archived, and removed in the background. "
                     "This process typically takes 20-30 seconds."

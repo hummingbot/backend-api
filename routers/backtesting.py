@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from deps import get_backtesting_service
 from models.backtesting import BacktestingConfig
-from services.backtesting_service import BacktestingService
+from services.backtesting_service import BacktestingService, BacktestTimeout
 
 router = APIRouter(tags=["Backtesting"], prefix="/backtesting")
 
@@ -15,8 +15,16 @@ async def run_backtesting(
     """Run a backtest synchronously. Returns results directly (may timeout for long backtests)."""
     try:
         return await service.run_backtest_sync(backtesting_config.model_dump())
+    except BacktestTimeout as e:
+        # A run abandoned at the wall-clock budget is a gateway timeout, not an engine
+        # error: the distinction is the only thing that tells a caller to retry smaller
+        # rather than to fix the config.
+        raise HTTPException(status_code=504, detail=str(e))
     except Exception as e:
-        return {"error": str(e)}
+        # Answering 200 with {"error": ...} made every failure -- a bad controller, a
+        # dead worker, a terminated run -- indistinguishable from a finished backtest,
+        # and the api-client only raises on non-2xx, so nothing downstream ever noticed.
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.post("/tasks")

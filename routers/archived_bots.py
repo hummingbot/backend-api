@@ -3,8 +3,8 @@ from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
-from database import AsyncDatabaseManager, BotRunRepository
-from deps import get_database_manager
+from deps import get_bots_orchestrator
+from services.bots_orchestrator import BotsOrchestrator
 from utils.file_system import fs_util
 from utils.hummingbot_database_reader import HummingbotDatabase
 
@@ -41,7 +41,7 @@ async def list_databases():
 @router.delete("/{db_path:path}")
 async def delete_archived_bot(
     db_path: str,
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    bots_orchestrator: BotsOrchestrator = Depends(get_bots_orchestrator)
 ):
     """
     Delete an archived bot and its entire directory.
@@ -64,16 +64,9 @@ async def delete_archived_bot(
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error deleting archived bot: {str(e)}")
 
-    # Best-effort: also clean matching BotRun records from PG
-    bot_runs_deleted = 0
-    try:
-        async with db_manager.get_session_context() as session:
-            bot_run_repo = BotRunRepository(session)
-            bot_runs_deleted = await bot_run_repo.delete_bot_runs_by_bot_name(bot_name)
-            if bot_runs_deleted > 0:
-                logger.info(f"Deleted {bot_runs_deleted} bot run record(s) for '{bot_name}'")
-    except Exception as e:
-        logger.warning(f"Failed to clean bot run records for '{bot_name}': {e}")
+    # Best-effort: also clean matching BotRun records from PG. Bot-run persistence is
+    # the orchestrator's (ARCH-035), so the session and the swallow live there.
+    bot_runs_deleted = await bots_orchestrator.delete_bot_runs_for_bot(bot_name)
 
     return {
         "message": f"Archived bot '{bot_name}' deleted successfully",

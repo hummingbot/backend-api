@@ -21,7 +21,7 @@ import inspect
 import re
 from unittest.mock import MagicMock
 
-from database.models import ExecutorRecord
+from database.models import ExecutorPerformanceSnapshot, ExecutorRecord
 from database.repositories.executor_repository import ExecutorRepository
 from services.executor_service import ExecutorService
 
@@ -30,6 +30,31 @@ def test_the_record_has_no_separate_volume_column():
     assert not hasattr(ExecutorRecord, "volume_traded_quote"), (
         "the executors table grew a second volume column again; filled_amount_quote is it"
     )
+
+
+def test_the_performance_snapshot_has_no_separate_volume_column():
+    """The same rule on the table FEAT-001 added, which mirrors these four metrics."""
+    assert not hasattr(ExecutorPerformanceSnapshot, "volume_traded_quote"), (
+        "the snapshot table grew a second volume column; filled_amount_quote is it"
+    )
+
+
+def test_the_normalized_performance_row_reads_the_filled_amount_as_volume():
+    """The unified /performance/history route maps volume_quote from the one field.
+
+    A row that read a second column here would put the LP deposit back into volume by the
+    back door, on the newest reader rather than the oldest.
+    """
+    from models.performance import executor_row_to_performance_row
+
+    row = executor_row_to_performance_row({
+        "timestamp": "2026-09-01T12:00:00+00:00",
+        "executor_id": "e-1",
+        "status": "RUNNING",
+        "filled_amount_quote": 2500.0,
+    })
+
+    assert row.volume_quote == 2500.0
 
 
 def test_every_aggregate_sums_the_filled_amount():
