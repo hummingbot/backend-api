@@ -1,9 +1,9 @@
 import logging
 from datetime import datetime
 from decimal import Decimal
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import Order
@@ -104,23 +104,23 @@ class OrderRepository:
             await self.session.flush()
         return order
 
-    async def get_orders(self, account_name: Optional[str] = None,
-                         connector_name: Optional[str] = None,
-                         trading_pair: Optional[str] = None,
-                         status: Optional[str] = None,
-                         start_time: Optional[int] = None,
-                         end_time: Optional[int] = None,
-                         limit: int = 100, offset: int = 0) -> List[Order]:
-        """Get orders with filtering and pagination."""
-        query = select(Order)
+    @staticmethod
+    def _filter_orders(query, account_names: Optional[List[str]] = None,
+                       connector_names: Optional[List[str]] = None,
+                       trading_pairs: Optional[List[str]] = None,
+                       status: Optional[str] = None,
+                       start_time: Optional[int] = None,
+                       end_time: Optional[int] = None):
+        """Apply the order-history filters shared by `get_orders` and `count_orders`.
 
-        # Apply filters
-        if account_name:
-            query = query.where(Order.account_name == account_name)
-        if connector_name:
-            query = query.where(Order.connector_name == connector_name)
-        if trading_pair:
-            query = query.where(Order.trading_pair == trading_pair)
+        `account_names=None` means every account; an empty list matches none.
+        """
+        if account_names is not None:
+            query = query.where(Order.account_name.in_(account_names))
+        if connector_names:
+            query = query.where(Order.connector_name.in_(connector_names))
+        if trading_pairs:
+            query = query.where(Order.trading_pair.in_(trading_pairs))
         if status:
             query = query.where(Order.status == status)
         if start_time:
@@ -129,13 +129,53 @@ class OrderRepository:
         if end_time:
             end_dt = datetime.fromtimestamp(end_time / 1000)
             query = query.where(Order.created_at <= end_dt)
+        return query
 
-        # Apply ordering and pagination
-        query = query.order_by(Order.created_at.desc())
-        query = query.limit(limit).offset(offset)
+    async def get_orders(self, account_names: Optional[List[str]] = None,
+                         connector_names: Optional[List[str]] = None,
+                         trading_pairs: Optional[List[str]] = None,
+                         status: Optional[str] = None,
+                         start_time: Optional[int] = None,
+                         end_time: Optional[int] = None,
+                         limit: int = 100,
+                         before: Optional[Tuple[datetime, str]] = None) -> List[Order]:
+        """Get orders newest first, keyset-paginated on (created_at, client_order_id).
+
+        `before` is the (created_at, client_order_id) of the last order already served;
+        only orders strictly older than it come back. created_at alone is not unique --
+        orders placed in the same microsecond share it -- so client_order_id breaks the
+        tie in both the ordering and the cut, and no order is skipped or served twice.
+        """
+        query = self._filter_orders(
+            select(Order), account_names, connector_names, trading_pairs, status, start_time, end_time
+        )
+        if before is not None:
+            created_at, client_order_id = before
+            query = query.where(
+                or_(
+                    Order.created_at < created_at,
+                    and_(Order.created_at == created_at, Order.client_order_id < client_order_id),
+                )
+            )
+
+        query = query.order_by(Order.created_at.desc(), Order.client_order_id.desc()).limit(limit)
 
         result = await self.session.execute(query)
         return result.scalars().all()
+
+    async def count_orders(self, account_names: Optional[List[str]] = None,
+                           connector_names: Optional[List[str]] = None,
+                           trading_pairs: Optional[List[str]] = None,
+                           status: Optional[str] = None,
+                           start_time: Optional[int] = None,
+                           end_time: Optional[int] = None) -> int:
+        """Count the orders `get_orders` would page through with the same filters."""
+        query = self._filter_orders(
+            select(func.count()).select_from(Order),
+            account_names, connector_names, trading_pairs, status, start_time, end_time,
+        )
+        result = await self.session.execute(query)
+        return result.scalar_one()
 
     async def get_active_orders(self, account_name: Optional[str] = None,
                                 connector_name: Optional[str] = None,

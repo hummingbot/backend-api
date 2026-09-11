@@ -8,7 +8,8 @@ wrappers for orders/trades/funding live here behind a single session+error
 helper (``_run_in_repo``).
 """
 import logging
-from typing import Dict, List, Optional
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 
 from database import AsyncDatabaseManager, FundingRepository, OrderRepository, TradeRepository
 
@@ -53,25 +54,35 @@ class TradingHistoryService:
             logger.error(f"{error_message}: {e}")
             return default(e) if callable(default) else default
 
-    async def get_orders(self, account_name: Optional[str] = None, connector_name: Optional[str] = None,
-                         trading_pair: Optional[str] = None, status: Optional[str] = None,
-                         start_time: Optional[int] = None, end_time: Optional[int] = None,
-                         limit: int = 100, offset: int = 0) -> List[Dict]:
-        """Get order history using OrderRepository."""
-        async def _fn(order_repo):
-            orders = await order_repo.get_orders(
-                account_name=account_name,
-                connector_name=connector_name,
-                trading_pair=trading_pair,
-                status=status,
-                start_time=start_time,
-                end_time=end_time,
-                limit=limit,
-                offset=offset
-            )
-            return [order_repo.to_dict(order) for order in orders]
+    async def search_orders(self, account_names: Optional[List[str]] = None,
+                            connector_names: Optional[List[str]] = None,
+                            trading_pairs: Optional[List[str]] = None, status: Optional[str] = None,
+                            start_time: Optional[int] = None, end_time: Optional[int] = None,
+                            limit: int = 100, before: Optional[Tuple[datetime, str]] = None) -> Dict:
+        """One page of order history plus the count of every order matching the filters.
 
-        return await self._run_in_repo(OrderRepository, _fn, [], "Error getting orders")
+        Returns ``{"orders": [...], "total_count": n}``. See ``OrderRepository.get_orders``
+        for the ``before`` keyset cursor.
+        """
+        filters = dict(
+            account_names=account_names,
+            connector_names=connector_names,
+            trading_pairs=trading_pairs,
+            status=status,
+            start_time=start_time,
+            end_time=end_time,
+        )
+
+        async def _fn(order_repo):
+            orders = await order_repo.get_orders(**filters, limit=limit, before=before)
+            return {
+                "orders": [order_repo.to_dict(order) for order in orders],
+                "total_count": await order_repo.count_orders(**filters),
+            }
+
+        return await self._run_in_repo(
+            OrderRepository, _fn, {"orders": [], "total_count": 0}, "Error getting orders"
+        )
 
     async def get_active_orders_history(self, account_name: Optional[str] = None, connector_name: Optional[str] = None,
                                         trading_pair: Optional[str] = None) -> List[Dict]:
