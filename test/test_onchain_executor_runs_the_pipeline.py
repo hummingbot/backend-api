@@ -7,6 +7,7 @@ the executor's own policy: one commit at most, replayed under the same idempoten
 failing simulation or a non-retryable rejection ends the executor FAILED with the evidence in
 custom_info; and nothing it reports can be mistaken for a Gateway swap or an LP position.
 """
+
 import asyncio
 from decimal import Decimal
 from types import SimpleNamespace
@@ -36,14 +37,31 @@ STAGED = {
     "status": "staged",
     "digest": DIGEST,
     "actions": [
-        {"chain_id": 8453, "from": WALLET, "to": WALLET, "value": "0", "label": "self-transfer",
-         "kind": "transfer", "protocol": None, "pending_tx_id": 1},
+        {
+            "chain_id": 8453,
+            "from": WALLET,
+            "to": WALLET,
+            "value": "0",
+            "label": "self-transfer",
+            "kind": "transfer",
+            "protocol": None,
+            "pending_tx_id": 1,
+        },
     ],
 }
 PASSED_SIMULATION = {
     "status": "passed",
-    "balanceChanges": [{"account": WALLET, "asset": "native", "amount": "-21000000", "direction": "out",
-                        "symbol": "ETH", "decimals": 18, "chainId": 8453}],
+    "balanceChanges": [
+        {
+            "account": WALLET,
+            "asset": "native",
+            "amount": "-21000000",
+            "direction": "out",
+            "symbol": "ETH",
+            "decimals": 18,
+            "chainId": 8453,
+        }
+    ],
     "gas": {"units": "21000", "priceWei": "1000000000", "nativeCost": "0.000021"},
     "warnings": ["dust"],
     "fees": [],
@@ -51,14 +69,21 @@ PASSED_SIMULATION = {
     "logs": [],
 }
 SIMULATED = {**STAGED, "status": "simulated", "simulation": PASSED_SIMULATION}
-REVERTED = {**STAGED, "status": "simulated", "simulation": {**PASSED_SIMULATION, "status": "reverted",
-                                                            "warnings": ["execution reverted"]}}
+REVERTED = {
+    **STAGED,
+    "status": "simulated",
+    "simulation": {**PASSED_SIMULATION, "status": "reverted", "warnings": ["execution reverted"]},
+}
 UNPRICED = {**STAGED, "status": "simulated", "simulation": {**PASSED_SIMULATION, "gas": None}}
 
 CONFIRMED = {"status": "committed", "digest": DIGEST, "result": {"status": "confirmed", "tx_hashes": [TX_HASH]}}
 PENDING = {"status": "committed", "digest": DIGEST, "result": {"status": "pending_approval", "tx_ids": [7]}}
-AA_SIGN = {"status": "committed", "digest": DIGEST, "result": {"status": "aa_sign_request"},
-           "requests": [{"kind": "aa_sign", "tx_id": 7}]}
+AA_SIGN = {
+    "status": "committed",
+    "digest": DIGEST,
+    "result": {"status": "aa_sign_request"},
+    "requests": [{"kind": "aa_sign", "tx_id": 7}],
+}
 
 
 class FakePipelineClient:
@@ -85,8 +110,9 @@ class FakePipelineClient:
         return Build.from_json(dict(self.staged), "evm")
 
     async def build(self, chain, *, app=None, skills=None, operation=None, arguments=None, operations=None):
-        self.calls.append(("build", {"chain": chain, "app": app, "skills": skills, "operation": operation,
-                                     "arguments": arguments}))
+        self.calls.append(
+            ("build", {"chain": chain, "app": app, "skills": skills, "operation": operation, "arguments": arguments})
+        )
         self._maybe_raise("build")
         return Build.from_json(dict(self.built), chain)
 
@@ -184,8 +210,7 @@ async def test_calls_mode_stages_simulates_and_commits():
 async def test_operation_mode_builds_and_skips_the_simulate_call():
     """A build comes back already simulated, so the executor goes straight to the risk check."""
     client = FakePipelineClient()
-    config = _config(mode="operation", calls=None, app="erc20", operation="transfer", arguments={"amount": "1"},
-                     skills=["gas"])
+    config = _config(mode="operation", calls=None, app="erc20", operation="transfer", arguments={"amount": "1"}, skills=["gas"])
     executor = _executor(client, config=config)
 
     await _run(executor)
@@ -471,15 +496,17 @@ async def test_early_stop_after_the_commit_cannot_cancel_it():
 
 
 @pytest.mark.asyncio
-async def test_gas_is_priced_when_the_api_has_a_rate():
+@pytest.mark.parametrize("commit", [False, True])
+async def test_gas_estimate_never_becomes_incurred_fees(commit):
     market_data = SimpleNamespace(get_rate=lambda base, quote: Decimal("3000"))
-    executor = _executor(FakePipelineClient(), strategy=_strategy(market_data))
+    executor = _executor(FakePipelineClient(), config=_config(commit=commit), strategy=_strategy(market_data))
 
     await _run(executor)
 
     assert executor.close_type == CloseType.COMPLETED
-    assert executor.get_cum_fees_quote() == Decimal("0.000021") * Decimal("3000")
-    assert executor.get_custom_info()["fees_quote_source"] == "priced"
+    assert executor.get_cum_fees_quote() == Decimal("0")
+    assert Decimal(executor.get_custom_info()["estimated_gas_quote"]) == Decimal("0.063")
+    assert executor.get_custom_info()["fees_quote_source"] == "unavailable"
 
 
 @pytest.mark.asyncio
@@ -498,9 +525,7 @@ async def test_a_gas_budget_refuses_an_expensive_commit():
 @pytest.mark.asyncio
 async def test_a_gas_budget_passes_a_cheap_commit():
     market_data = SimpleNamespace(get_rate=lambda base, quote: Decimal("3000"))
-    executor = _executor(
-        FakePipelineClient(), config=_config(max_gas_quote=Decimal("1")), strategy=_strategy(market_data)
-    )
+    executor = _executor(FakePipelineClient(), config=_config(max_gas_quote=Decimal("1")), strategy=_strategy(market_data))
 
     await _run(executor)
 
@@ -517,7 +542,8 @@ async def test_unpriced_gas_reports_zero_fees_and_says_so():
     assert executor.get_custom_info()["reason"] == "gas_unpriced"
     assert executor.get_cum_fees_quote() == Decimal("0")
     info = executor.get_custom_info()
-    assert info["fees_quote_source"] == "unpriced"
+    assert info["fees_quote_source"] == "unavailable"
+    assert info["estimated_gas_quote"] is None
     assert info["gas_native_cost"] is None
 
 
@@ -528,7 +554,8 @@ async def test_no_market_data_service_means_unpriced():
     await _run(executor)
 
     assert executor.get_cum_fees_quote() == Decimal("0")
-    assert executor.get_custom_info()["fees_quote_source"] == "unpriced"
+    assert executor.get_custom_info()["fees_quote_source"] == "unavailable"
+    assert executor.get_custom_info()["estimated_gas_quote"] is None
 
 
 # ---------------------------------------------------------------------------- reporting
@@ -626,7 +653,8 @@ async def test_default_pair_does_not_change_gas_budget_currency():
     client = FakePipelineClient()
     executor = _executor(client, config=_config(max_gas_quote=Decimal("0.01")), strategy=_strategy(market))
     await _run(executor)
-    assert executor.get_cum_fees_quote() == Decimal("0.063")
+    assert executor.get_cum_fees_quote() == Decimal("0")
+    assert Decimal(executor.get_custom_info()["estimated_gas_quote"]) == Decimal("0.063")
     assert executor.get_custom_info()["reason"] == "gas_over_budget"
     assert "commit" not in client.methods_called()
 
@@ -649,6 +677,7 @@ async def test_svm_gas_uses_sol_usdt():
     def rate(base, quote):
         pairs.append((base, quote))
         return Decimal("150")
+
     client = FakePipelineClient()
     config = _config(chain="svm", chain_id=1, mode="operation", calls=None, operation="jupiter_swap", max_gas_quote=1)
     executor = _executor(client, config=config, strategy=_strategy(SimpleNamespace(get_rate=rate)))

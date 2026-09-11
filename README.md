@@ -364,6 +364,8 @@ receipt balance is shown separately and is never divided between controllers.
 Unknown submission outcomes remain unresolved, duplicate receipts count once,
 and storage or balance-read failures return 503 instead of an empty portfolio.
 
+Simulation estimates are exposed as `custom_info.estimated_gas_quote`, separately from incurred fees. Receipt-derived quote fees are currently unavailable (`fees_quote_source: unavailable`); the executor does not book simulated gas into trading fee totals.
+
 `max_gas_quote` checks estimated execution gas in USDT using the market-data
 price pool. Missing pricing stops a bounded request. This is an estimate, not a
 signer-enforced fee cap; it excludes rollup data fees and provider surcharges.

@@ -13,6 +13,7 @@ Two things it is careful about:
 * ``custom_info`` never carries ``transaction_hash`` or ``position_address``: the ExecutorService
   reads the first as a Gateway swap to record and the second as an orphaned LP position.
 """
+
 import dataclasses
 import inspect
 import logging
@@ -206,7 +207,7 @@ class OnchainExecutor(ExecutorBase):
         for warning in simulation.warnings:
             self.logger().warning(f"onchain_executor {self.config.id}: simulation warning: {warning}")
         if self.config.max_gas_quote is not None:
-            fees = self.get_cum_fees_quote()
+            fees = self._estimated_gas_quote()
             if self._fees_are_priced() and fees > self.config.max_gas_quote:
                 self._fail(
                     "gas_over_budget",
@@ -214,9 +215,7 @@ class OnchainExecutor(ExecutorBase):
                 )
                 return
             if not self._fees_are_priced():
-                self._fail(
-                    "gas_unpriced", message="Cannot verify max_gas_quote in USDT: gas estimate or price unavailable"
-                )
+                self._fail("gas_unpriced", message="Cannot verify max_gas_quote in USDT: gas estimate or price unavailable")
                 return
         if not self.config.commit:
             self.logger().info(f"onchain_executor {self.config.id}: dry run, simulation passed, not committing")
@@ -262,13 +261,15 @@ class OnchainExecutor(ExecutorBase):
     ):
         error: Dict[str, Any] = {"reason": reason, "phase": self._phase.value}
         if isinstance(exc, PipelineError):
-            error.update({
-                "status": exc.status,
-                "code": exc.code,
-                "backend_code": exc.backend_code,
-                "message": exc.message,
-                "request_id": exc.request_id,
-            })
+            error.update(
+                {
+                    "status": exc.status,
+                    "code": exc.code,
+                    "backend_code": exc.backend_code,
+                    "message": exc.message,
+                    "request_id": exc.request_id,
+                }
+            )
         elif exc is not None:
             error["message"] = f"{type(exc).__name__}: {exc}"
         if message:
@@ -300,6 +301,11 @@ class OnchainExecutor(ExecutorBase):
         return Decimal("0")
 
     def get_cum_fees_quote(self) -> Decimal:
+        # Pipeline exposes a simulation estimate, not receipt-derived fees.
+        # Never book hypothetical gas as incurred trading fees.
+        return Decimal("0")
+
+    def _estimated_gas_quote(self) -> Decimal:
         cost = self._gas_native_cost()
         rate = self._quote_rate()
         if cost is None or rate is None:
@@ -390,19 +396,20 @@ class OnchainExecutor(ExecutorBase):
             "cluster": cfg.cluster if cfg.chain == "svm" else None,
             "digest": self._digest,
             "build_expires_at": build.expires_at if build is not None else None,
-            "approvals": [dataclasses.asdict(change) for change in simulation.approvals]
-            if simulation is not None else [],
+            "approvals": [dataclasses.asdict(change) for change in simulation.approvals] if simulation is not None else [],
             "action_count": len(actions),
             "actions": actions,
             "simulation_passed": simulation.passed if simulation is not None else None,
             "simulation_warnings": list(simulation.warnings) if simulation is not None else [],
-            "balance_changes": [dataclasses.asdict(change) for change in simulation.balance_changes]
-            if simulation is not None else [],
+            "balance_changes": (
+                [dataclasses.asdict(change) for change in simulation.balance_changes] if simulation is not None else []
+            ),
             "gas_units": gas.units if gas is not None else None,
             "gas_price_wei": gas.price_wei if gas is not None else None,
             "gas_native_cost": gas.native_cost if gas is not None else None,
             "quote_asset": "USDT",
-            "fees_quote_source": "priced" if self._fees_are_priced() else "unpriced",
+            "fees_quote_source": "unavailable",
+            "estimated_gas_quote": str(self._estimated_gas_quote()) if self._fees_are_priced() else None,
             "committed": bool(outcome is not None and outcome.confirmed),
             "commit_attempted": self._commit_sent,
             "outcome_kind": outcome.kind if outcome is not None else None,
