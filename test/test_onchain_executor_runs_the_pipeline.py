@@ -335,6 +335,18 @@ async def test_a_commit_lost_in_transport_is_replayed_under_the_same_key():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("phase", ["stage_evm", "simulate", "commit"])
+async def test_account_contention_retries_the_same_phase_and_commits_once(phase):
+    client = FakePipelineClient(errors={phase: [PipelineError(409, "operation_in_flight", "busy")]})
+    executor = _executor(client)
+    await _run(executor)
+    assert executor.close_type == CloseType.COMPLETED
+    assert client.methods_called().count(phase) == 2
+    assert set(client.commit_keys) == {DIGEST}
+    assert executor.get_custom_info()["tx_hashes"] == [TX_HASH]
+
+
+@pytest.mark.asyncio
 async def test_an_unexpected_exception_fails_closed():
     class Boom(FakePipelineClient):
         async def simulate(self, build):

@@ -30,7 +30,7 @@ dependencies:
       - hummingbot
       # Aomi Pipeline client for the onchain_executor. Local development against a checkout
       # installs it editable instead: pip install -e ../aomi-python
-      - aomi @ git+https://github.com/aomi-labs/aomi-python@b5c8ab20a3f516f9d2854403f3993c309b3dcec2
+      - aomi @ git+https://github.com/aomi-labs/aomi-python@b108c2d5399ac1d3a31a98f4b6668b3b20233d8e
       - geckoterminal-py>=0.3.1
       - msgpack>=1.0.5
       - flake8
