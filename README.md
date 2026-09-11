@@ -403,8 +403,12 @@ A policy edit applies to new admissions, not actions already admitted.
 `GET /executors/lending/policy` exposes the active grant to authenticated callers.
 Automatic clients must set `require_lending_policy: true`: this prevents a policy
 removed between preview and creation from falling back to unrestricted manual mode.
-Condor's automatic gate remains disabled until its grant and valuation checks are
-connected; this API feature alone does not enable unattended execution.
+Condor PR #232 connects its automatic gate to this grant, durable contribution
+history, and an independent USDC/USDT market quote. A named agent must explicitly
+request the enforced policy, and normal portfolio risk limits still apply.
+The local fork integration check completed a granted supply and withdrawal through
+Condor's risk callback and MCP tool, and refused an over-limit request. This used
+an explicitly bounded Anvil test signer; it does not certify production signing.
 
 The real PostgreSQL race/restart regression runs with an isolated local database
 whose name starts `hummingbot_policy_check_`:
