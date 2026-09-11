@@ -1,5 +1,6 @@
 import logging
-from typing import List
+from pathlib import Path
+from typing import Callable, List
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -171,6 +172,49 @@ class GatewaySettings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="GATEWAY_", extra="ignore")
 
 
+class AomiSettings(BaseSettings):
+    """Aomi Pipeline API configuration, used by the onchain_executor.
+
+    The bearer can be given inline (AOMI_TOKEN) or as a file path (AOMI_TOKEN_FILE). The file is
+    re-read on every request, so a rotated token takes effect without a restart.
+    """
+
+    url: str = Field(default="https://chat.aomi.dev", description="Aomi origin serving /v1/pipeline")
+    token: str = Field(default="", description="Bearer token with pipeline:execute (and custody:delegate to commit)")
+    token_file: str = Field(
+        default="",
+        description="Path to a file holding the bearer token; takes precedence over AOMI_TOKEN when set"
+    )
+    timeout: float = Field(default=30.0, description="Per-request HTTP timeout in seconds")
+    preparation_application_id: int | None = Field(
+        default=None, gt=0,
+        description="Registered solana-defi application ID; required for market preparation"
+    )
+
+    lending_policy_file: str = Field(
+        default="", description="Operator-owned JSON lending allocation policy; empty disables automatic grants"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="AOMI_", extra="ignore")
+
+    @property
+    def configured(self) -> bool:
+        """Whether any bearer source is set."""
+        return bool(self.token or self.token_file)
+
+    def token_provider(self) -> Callable[[], str]:
+        """A zero-arg callable the PipelineClient can pull the current bearer from."""
+        token_file = self.token_file
+        token = self.token
+
+        def _provide() -> str:
+            if token_file:
+                return Path(token_file).read_text(encoding="utf-8").strip()
+            return token
+
+        return _provide
+
+
 class CORSSettings(BaseSettings):
     """CORS configuration for the API (SEC-019).
 
@@ -308,6 +352,7 @@ class Settings(BaseSettings):
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     aws: AWSSettings = Field(default_factory=AWSSettings)
     gateway: GatewaySettings = Field(default_factory=GatewaySettings)
+    aomi: AomiSettings = Field(default_factory=AomiSettings)
     cors: CORSSettings = Field(default_factory=CORSSettings)
     app: AppSettings = Field(default_factory=AppSettings)
     backtesting: BacktestingSettings = Field(default_factory=BacktestingSettings)

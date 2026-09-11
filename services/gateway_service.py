@@ -35,11 +35,15 @@ class GatewayService:
         self.SOURCE_PATH = os.getcwd()
         # Use BOTS_PATH if set (for Docker), otherwise use SOURCE_PATH (for local)
         self.BOTS_PATH = os.environ.get('BOTS_PATH', self.SOURCE_PATH)
-        try:
-            self.client = docker.from_env()
-        except DockerException as e:
-            logger.error(f"Failed to connect to Docker. Error: {e}")
-            raise
+        self._client = None
+
+    @property
+    def client(self):
+        # Defer Docker discovery until a Gateway operation is requested. Aomi
+        # and CEX executors can run while Docker/Gateway is unavailable.
+        if self._client is None:
+            self._client = docker.from_env()
+        return self._client
 
     def _gateway_base(self, host: bool = False) -> str:
         """Gateway-files base. host=False is the path the API process reads/writes

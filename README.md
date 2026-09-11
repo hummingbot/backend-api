@@ -341,9 +341,131 @@ make tailscale-status     # Check tailnet peers
 ```
 Confirm the node appears in `tailscale status` and that MagicDNS is enabled in your Tailscale admin console.
 
+## Aomi on-chain executors
+
+`onchain_executor` runs a transaction bundle through Aomi's stage, simulate and
+commit lifecycle. Configure `AOMI_URL` and either `AOMI_TOKEN_FILE` or
+`AOMI_TOKEN`; the Aomi account owns the signer. A Hummingbot exchange connector
+or Gateway wallet is not required. PostgreSQL is required: creation is saved
+before the executor starts, and failed completion writes retain the live result
+for retry.
+
+For Aave V3, `mode: "lending"` takes an exact `lending` plan containing
+`chain_id`, `wallet`, `pool`, `asset`, `action` (`supply` or `withdraw`) and
+`amount` in raw token units. The executor verifies every staged call against
+that plan before committing. Use `commit: false` to preview first. A pending
+wallet-signature response is not reported as a confirmed transaction.
+
+`GET /executors/lending/positions` reconstructs controller contributions from
+durable executor history and reads the wallet's current receipt-token balance
+for the supported Base USDC/Aave market. It reports raw amounts as strings.
+Contributions are not current asset balances or profit; a shared wallet's
+receipt balance is shown separately and is never divided between controllers.
+Unknown submission outcomes remain unresolved, duplicate receipts count once,
+and storage or balance-read failures return 503 instead of an empty portfolio.
+
+Simulation estimates are exposed as `custom_info.estimated_gas_quote`, separately from incurred fees. Receipt-derived quote fees are currently unavailable (`fees_quote_source: unavailable`); the executor does not book simulated gas into trading fee totals.
+
+`max_gas_quote` checks estimated execution gas in USDT using the market-data
+price pool. Missing pricing stops a bounded request. This is an estimate, not a
+signer-enforced fee cap; it excludes rollup data fees and provider surcharges.
+
+### Solana market preparation
+
+Set `AOMI_PREPARATION_APPLICATION_ID` to the positive ID of the registered
+`solana-defi` Aomi application. The Aomi deployment must have that application's
+active release artifact and its preparation service configured. An app name
+alone does not select a verified release. Leaving the ID unset disables this
+preparation endpoint without disabling other executors.
+
+`POST /executors/onchain/prepare` accepts `operation` (`venues`, `market`,
+`position`, or `prepare`) and an `arguments` object. Hummingbot binds market,
+position and preparation requests to the connected Aomi Solana wallet; callers
+cannot choose another application's ID or a different RPC endpoint. The response
+contains unsigned instructions and market data, never a staged Build or a
+transaction submission.
+
+Submit the returned batches through the shared `onchain_executor` in SVM
+instruction mode to simulate them. Confirmation should retain the exact
+`reviewed_svm_plan_hash` from the preview and an explicit
+`max_svm_network_fee_lamports`. These bind the reviewed instructions and check
+complete simulated network fees; they do not constitute an unattended spending
+grant. Venue-specific SDK recipes run inside Aomi, so supporting these markets
+does not require separate Hummingbot venue connectors.
+
+`svm_spending_policy` adds a wallet, market account, protocol program, allowed
+top-level programs and a map of `max_debits_raw` keyed by mint (or `native` for
+SOL). Every observed outgoing wallet asset must be listed. Limits use unsigned
+raw integer strings, require a native limit, and do not subtract credits from
+other accounts or other balance rows. Every staged instruction for the selected protocol must reference the selected
+market. A passing simulation with incomplete
+balance snapshots still refuses the policy before wallet handoff.
+
+These limits apply to final per-account net balance changes in one simulated
+transaction. They do not bound intermediate transfers, future execution state,
+approval authority or off-wallet economic exposure such as staked positions.
+Multi-transaction previews cannot certify a sequential budget and are refused
+when this policy is set. RPC fallback and unsupported token account layouts
+remain incomplete for this check. Use the exact reviewed plan hash when confirming;
+this policy is not an unattended grant or an on-chain spending restriction.
+
 ## Support
 
 - **Docs**: https://hummingbot.org/hummingbot-api/
 - **Tailscale guide**: https://hummingbot.org/hummingbot-api/tailscale/
 - **API Docs**: http://localhost:8000/docs
 - **Issues**: https://github.com/hummingbot/hummingbot-api/issues
+
+### Operator lending allocation policy
+
+Set `AOMI_LENDING_POLICY_FILE` on every API process sharing the executor database to
+an operator-owned JSON file. The API re-reads it at admission. A missing or invalid
+configured file refuses committed on-chain creates. Keep this file outside agent
+writable configuration. An example (amounts are raw USDC units, six decimals):
+
+```json
+{
+  "wallet": "0xYOUR_AOMI_SIGNING_WALLET",
+  "account_name": "master_account",
+  "controller_limits_raw": {"reserves-agent": "100000000"},
+  "max_total_supply_raw": "100000000",
+  "max_action_raw": "50000000",
+  "max_gas_quote": "1"
+}
+```
+
+Replace the wallet placeholder with the actual signer. The supported market is
+Base USDC at Aave V3. While configured, all committed on-chain creates must be
+exact lending plans for that wallet and a granted controller. The total limit
+covers recorded net contributions and pending supplies across controllers and
+Hummingbot accounts using that wallet. It is not a USDT market valuation or a cap
+on externally supplied capital, accrued interest, losses, or other trading exposure.
+Withdrawals are limited to the controller's confirmed contributions minus pending
+withdrawals; pending deposits cannot fund withdrawals. Only confirmed withdrawals
+release capacity. Historical raw/operation commits require reconciliation before
+activating this policy because their lending effects cannot be reconstructed.
+
+Admission acquires a PostgreSQL transaction lock, reads full durable history,
+validates the grant, and inserts the pending executor record in the same transaction.
+The executor starts only after commit. Concurrent API processes and process restarts
+therefore see the same reservation. An unknown result continues to reserve capacity;
+operators must reconcile it against actual receipts, not delete history to free limits.
+A policy edit applies to new admissions, not actions already admitted.
+
+`GET /executors/lending/policy` exposes the active grant to authenticated callers.
+Automatic clients must set `require_lending_policy: true`: this prevents a policy
+removed between preview and creation from falling back to unrestricted manual mode.
+Condor PR #232 connects its automatic gate to this grant, durable contribution
+history, and an independent USDC/USDT market quote. A named agent must explicitly
+request the enforced policy, and normal portfolio risk limits still apply.
+The local fork integration check completed a granted supply and withdrawal through
+Condor's risk callback and MCP tool, and refused an over-limit request. This used
+an explicitly bounded Anvil test signer; it does not certify production signing.
+
+The real PostgreSQL race/restart regression runs with an isolated local database
+whose name starts `hummingbot_policy_check_`:
+
+```bash
+AOMI_POLICY_TEST_DATABASE_URL=postgresql+asyncpg://USER@127.0.0.1:PORT/hummingbot_policy_check_test \
+  pytest -q test/test_lending_policy_admission.py
+```

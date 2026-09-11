@@ -235,6 +235,7 @@ EXECUTOR_TYPES = Literal[
     "xemm_executor",
     "order_executor",
     "lp_executor",
+    "onchain_executor",
 ]
 
 
@@ -285,6 +286,28 @@ class CreateExecutorRequest(BaseModel):
                             "side": "BUY",
                             "extra_params": {"strategyType": 0},
                             "keep_position": False
+                        }
+                    }
+                },
+                {
+                    "summary": "Onchain Executor",
+                    "description": "Stage, simulate and commit a 0-value transfer on Base through the Aomi Pipeline "
+                                   "(put your own wallet in 'to' for a self-transfer)",
+                    "value": {
+                        "account_name": "master_account",
+                        "executor_config": {
+                            "type": "onchain_executor",
+                            "chain_id": 8453,
+                            "mode": "calls",
+                            "calls": [
+                                {
+                                    "to": "0x0000000000000000000000000000000000000000",
+                                    "value": "0",
+                                    "data": {"signature": "", "args": [], "raw": ""},
+                                    "description": "0-value self-transfer"
+                                }
+                            ],
+                            "commit": True
                         }
                     }
                 }

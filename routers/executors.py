@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from starlette import status
 
+from config import settings
 from deps import get_executor_service, get_market_data_service
 from models.executors import (
     CreateExecutorRequest,
@@ -25,6 +26,7 @@ from models.executors import (
     StopExecutorRequest,
     StopExecutorResponse,
 )
+from models.onchain_preparation import OnchainPreparationRequest
 from models.pagination import PaginatedResponse
 from services.executor_service import ExecutorService
 from services.market_data_service import MarketDataService
@@ -33,6 +35,30 @@ from utils.trading_pair import InvalidTradingPair, split_trading_pair
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Executors"], prefix="/executors")
+
+
+@router.post("/onchain/prepare")
+async def onchain_preparation(request: OnchainPreparationRequest):
+    """Read markets/positions or prepare unsigned instructions through the configured Aomi app."""
+    from services.onchain_executor import OnchainExecutor
+    from services.onchain_preparation import prepare_onchain
+    from aomi.pipeline.errors import PipelineError
+
+    try:
+        async with OnchainExecutor._default_client() as client:
+            return await prepare_onchain(request, client, application_id=settings.aomi.preparation_application_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except PipelineError as exc:
+        # Log only typed status/code, never upstream bodies, URLs, or credentials.
+        logger.warning("Aomi preparation failed: status=%s code=%s", exc.status,
+                       "operation_in_flight" if exc.code == "operation_in_flight" else "pipeline_error")
+        if exc.status == 409 and exc.code == "operation_in_flight":
+            raise HTTPException(status_code=409, detail="Aomi account is busy. Wait for its current operation to finish, then try again.")
+        raise HTTPException(status_code=502, detail="Aomi market preparation is unavailable")
+    except Exception:
+        # Credential-bearing upstream URLs and bodies must not reach API clients.
+        raise HTTPException(status_code=502, detail="Aomi market preparation is unavailable")
 
 
 @router.post("/", response_model=CreateExecutorResponse, status_code=status.HTTP_201_CREATED)
@@ -52,12 +78,16 @@ async def create_executor(
     - **xemm_executor**: Cross-exchange market making
     - **order_executor**: Simple order execution
     - **lp_executor**: Liquidity provider position on CLMM DEXs (Meteora, Raydium, etc.)
+    - **onchain_executor**: One on-chain transaction bundle through the Aomi Pipeline (stage, simulate, commit)
 
     The `executor_config` must include:
     - `type`: One of the executor types above
     - `connector_name`: Exchange connector (e.g., "binance", "binance_perpetual")
     - `trading_pair`: Trading pair (e.g., "BTC-USDT")
     - Additional type-specific configuration (see /executors/types/{type}/config for details)
+
+    `onchain_executor` takes no connector: it needs `chain_id` and `mode` ("operation" with `operation`/`arguments`,
+    or "calls" with a list of EVM calls); `connector_name`/`trading_pair` are derived from the chain when omitted.
 
     Returns the created executor ID and initial status.
     """
@@ -155,6 +185,34 @@ async def list_executors(
     except Exception as e:
         logger.error(f"Error listing executors: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error listing executors: {str(e)}")
+
+
+@router.get("/lending/policy")
+async def get_lending_policy():
+    """Read the operator-owned grant; creation revalidates it under the database lock."""
+    from config import settings
+    from services.lending_policy import LendingPolicy
+
+    try:
+        policy = LendingPolicy.load(settings.aomi.lending_policy_file)
+        return policy.report() if policy else {"enabled": False}
+    except Exception:
+        raise HTTPException(status_code=503, detail="Lending policy unavailable")
+
+
+@router.get("/lending/positions")
+async def get_lending_positions(executor_service: ExecutorService = Depends(get_executor_service)):
+    """Attributed contributions and unresolved attempts, including completed executors.
+
+    Raw amounts are strings. These are not live balances or available withdrawals;
+    receipt-token balances must be reconciled separately. A storage or history error
+    returns 503, never a partial list or a zero balance.
+    """
+    try:
+        return {"positions": await executor_service.get_lending_positions()}
+    except Exception:
+        logger.exception("Lending position history is unavailable")
+        raise HTTPException(status_code=503, detail="Lending position history is unavailable")
 
 
 @router.get("/summary", response_model=ExecutorsSummaryResponse)
@@ -293,6 +351,11 @@ async def get_available_executor_types():
                 "type": "lp_executor",
                 "description": "LP position management for CLMM pools (Meteora, Raydium) ",
                 "use_case": "Automated liquidity provision with position tracking"
+            },
+            {
+                "type": "onchain_executor",
+                "description": "One on-chain transaction bundle through the Aomi Pipeline: stage, fork-simulate, commit",
+                "use_case": "Kernel-signed EVM transactions (transfers, contract calls, catalog operations) without a connector"
             }
         ]
     }

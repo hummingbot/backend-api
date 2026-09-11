@@ -731,6 +731,16 @@ DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@localhost:5432/hummingbot_
 GATEWAY_URL=http://localhost:15888
 GATEWAY_PASSPHRASE=$CONFIG_PASSWORD
 
+# Aomi Pipeline (optional; needed by the onchain_executor). AOMI_TOKEN is a bearer with
+# pipeline:execute (plus custody:delegate to commit); leave it empty to keep the executor
+# disabled, or point AOMI_TOKEN_FILE at a file holding the token instead.
+AOMI_URL=https://chat.aomi.dev
+AOMI_TOKEN=
+# Optional operator-owned JSON policy; grants are enforced before durable execution admission.
+AOMI_LENDING_POLICY_FILE=
+# Registered solana-defi app ID for market preparation (uncomment after registration).
+# AOMI_PREPARATION_APPLICATION_ID=123
+
 # Paths
 BOTS_PATH=$(pwd)
 

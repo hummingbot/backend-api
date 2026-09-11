@@ -28,6 +28,9 @@ dependencies:
       # refuses to start against a core that is missing them, so a wrong install is a
       # startup error rather than a deployment that books zeros in silence.
       - hummingbot
+      # Aomi Pipeline client for the onchain_executor. Local development against a checkout
+      # installs it editable instead: pip install -e ../aomi-python
+      - aomi @ git+https://github.com/aomi-labs/aomi-python@caa72d5225dd60e482835e0341a91293d7549dd3
       - geckoterminal-py>=0.3.1
       - msgpack>=1.0.5
       - flake8

@@ -16,6 +16,7 @@ ensure_newline_before_comments = true
 combine_as_imports = true
 
 [tool.pytest.ini_options]
+markers = ["integration: live tests against a running API (and Gateway/Aomi); skipped unless their environment is set"]
 testpaths = ["test"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"

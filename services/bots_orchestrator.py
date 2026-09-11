@@ -26,8 +26,8 @@ class BotsOrchestrator:
         self.broker_username = broker_username
         self.broker_password = broker_password
 
-        # Initialize Docker client
-        self.docker_client = docker.from_env()
+        # Standalone executors do not need Docker. Connect when bot discovery runs.
+        self.docker_client = None
 
         # Initialize MQTT manager
         self.mqtt_manager = MQTTManager(host=broker_host, port=broker_port, username=broker_username, password=broker_password)
@@ -64,6 +64,8 @@ class BotsOrchestrator:
         return await loop.run_in_executor(None, self._sync_get_active_containers)
 
     def _sync_get_active_containers(self):
+        if self.docker_client is None:
+            self.docker_client = docker.from_env()
         return [
             container.name
             for container in self.docker_client.containers.list()
