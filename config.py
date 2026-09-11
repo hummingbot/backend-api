@@ -186,6 +186,10 @@ class AomiSettings(BaseSettings):
         description="Path to a file holding the bearer token; takes precedence over AOMI_TOKEN when set"
     )
     timeout: float = Field(default=30.0, description="Per-request HTTP timeout in seconds")
+    preparation_application_id: int | None = Field(
+        default=None, gt=0,
+        description="Registered solana-defi application ID; required for market preparation"
+    )
 
     lending_policy_file: str = Field(
         default="", description="Operator-owned JSON lending allocation policy; empty disables automatic grants"

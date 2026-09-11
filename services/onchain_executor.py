@@ -15,7 +15,9 @@ Two things it is careful about:
 """
 
 import dataclasses
+import hashlib
 import inspect
+import json
 import logging
 from decimal import Decimal, InvalidOperation
 from enum import Enum
@@ -172,6 +174,8 @@ class OnchainExecutor(ExecutorBase):
             self._build = await self._client.stage_evm(cfg.lending.calls(), app=cfg.app, skills=cfg.skills)
         elif cfg.mode == "calls":
             self._build = await self._client.stage_evm(cfg.calls, app=cfg.app, skills=cfg.skills)
+        elif cfg.mode == "instructions":
+            self._build = await self._client.stage_svm(instructions=cfg.instructions, app=cfg.app, skills=cfg.skills)
         else:
             self._build = await self._client.build(
                 cfg.chain, app=cfg.app, skills=cfg.skills, operation=cfg.operation_path, arguments=cfg.arguments or {}
@@ -204,8 +208,30 @@ class OnchainExecutor(ExecutorBase):
             except ValueError as exc:
                 self._fail("lending_plan_changed", exc)
                 return
+        if self.config.reviewed_svm_plan_hash is not None:
+            if self._svm_plan_hash() != self.config.reviewed_svm_plan_hash:
+                self._fail("reviewed_plan_changed", message="Solana execution plan differs from the reviewed preview")
+                return
+        if self.config.svm_spending_policy is not None:
+            try:
+                self.config.svm_spending_policy.verify(build, self.config.cluster)
+            except ValueError as exc:
+                self._fail("spending_policy_refused", exc)
+                return
         for warning in simulation.warnings:
             self.logger().warning(f"onchain_executor {self.config.id}: simulation warning: {warning}")
+        if self.config.max_svm_network_fee_lamports is not None:
+            fee = self._svm_network_fee_lamports()
+            if fee is None:
+                self._fail("network_fee_unavailable", message="Complete Solana network fee evidence is unavailable")
+                return
+            if fee > self.config.max_svm_network_fee_lamports:
+                self._fail(
+                    "network_fee_over_budget",
+                    message=f"Simulated network fee {fee} lamports exceeds the "
+                            f"{self.config.max_svm_network_fee_lamports}-lamport limit",
+                )
+                return
         if self.config.max_gas_quote is not None:
             fees = self._estimated_gas_quote()
             if self._fees_are_priced() and fees > self.config.max_gas_quote:
@@ -315,6 +341,70 @@ class OnchainExecutor(ExecutorBase):
     def _fees_are_priced(self) -> bool:
         return self._gas_native_cost() is not None and self._quote_rate() is not None
 
+    def _svm_network_fee_lamports(self) -> Optional[int]:
+        """Return a complete fee estimate, never a partial sum from missing simulation steps."""
+        build = self._build
+        simulation = build.simulation if build is not None else None
+        if build is None or build.chain != "svm" or simulation is None or not simulation.passed:
+            return None
+        guards = [g for g in simulation.guards if isinstance(g, dict) and g.get("name") == "svm_network_fees"]
+        if len(guards) != 1 or guards[0].get("status") != "passed" or not simulation.fees:
+            return None
+        wallet = build.from_address
+        if not wallet or not build.actions:
+            return None
+        for action in build.actions:
+            if not isinstance(action, dict):
+                return None
+            inner = action.get("instruction") or action.get("transaction")
+            if not isinstance(inner, dict) or inner.get("cluster") != self.config.cluster:
+                return None
+            if (inner.get("payer") or inner.get("fee_payer") or inner.get("feePayer")) != wallet:
+                return None
+        total = 0
+        for fee in simulation.fees:
+            if not isinstance(fee, dict) or (
+                fee.get("kind") != "network" or fee.get("asset") != "native"
+                or type(fee.get("decimals")) is not int or fee["decimals"] != 9
+                or fee.get("cluster") != self.config.cluster or fee.get("account") != wallet
+            ):
+                return None
+            amount = fee.get("amount")
+            if not isinstance(amount, str) or not amount.isascii() or not amount.isdecimal() or len(amount) > 20:
+                return None
+            value = int(amount)
+            if value > 2**64 - 1:
+                return None
+            total += value
+        return total
+
+    def _svm_plan_hash(self) -> Optional[str]:
+        """Seal an instruction plan across restaging, excluding only queue metadata and labels.
+
+        Unlike the Build digest this is stable when pending IDs and expiry change.
+        Include unknown instruction fields conservatively, including fee and assembly
+        metadata; a backend extension must never silently broaden reviewed authority.
+        """
+        build = self._build
+        if build is None or build.chain != "svm" or not build.actions:
+            return None
+        plan = []
+        for action in build.actions:
+            if not isinstance(action, dict):
+                return None
+            inner = action.get("instruction")
+            if action.get("lane") != "instruction" or not isinstance(inner, dict):
+                return None
+            if any(not isinstance(inner.get(key), str) or not inner[key] for key in ("payer", "cluster", "program_id")):
+                return None
+            if not isinstance(inner.get("data_base64"), str) or not isinstance(inner.get("accounts"), list):
+                return None
+            plan.append({key: value for key, value in inner.items() if key not in {
+                "pending_ix_id", "last_batch_status", "current_lifecycle", "description",
+            }})
+        encoded = json.dumps({"version": 1, "instructions": plan}, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
     def _gas_native_cost(self) -> Optional[Decimal]:
         simulation = self._build.simulation if self._build is not None else None
         gas = simulation.gas if simulation is not None else None
@@ -385,6 +475,8 @@ class OnchainExecutor(ExecutorBase):
         simulation = build.simulation if build is not None else None
         gas = simulation.gas if simulation is not None else None
         actions: List[Dict[str, Any]] = build.action_summaries if build is not None else []
+        clusters = {action.get("cluster") for action in actions}
+        svm_fee = self._svm_network_fee_lamports()
         return {
             "phase": self._phase.value,
             "chain": cfg.chain,
@@ -393,14 +485,25 @@ class OnchainExecutor(ExecutorBase):
             "app": cfg.app,
             "operation": cfg.operation,
             "wallet_address": build.from_address if build is not None else None,
-            "cluster": cfg.cluster if cfg.chain == "svm" else None,
+            "cluster": next(iter(clusters)) if cfg.chain == "svm" and len(clusters) == 1 else None,
+            "requested_cluster": cfg.cluster if cfg.chain == "svm" else None,
             "digest": self._digest,
+            "svm_plan_hash": self._svm_plan_hash(),
+            "svm_spending_policy": cfg.svm_spending_policy.model_dump() if cfg.svm_spending_policy is not None else None,
             "build_expires_at": build.expires_at if build is not None else None,
             "approvals": [dataclasses.asdict(change) for change in simulation.approvals] if simulation is not None else [],
             "action_count": len(actions),
             "actions": actions,
             "simulation_passed": simulation.passed if simulation is not None else None,
             "simulation_warnings": list(simulation.warnings) if simulation is not None else [],
+            "simulation_guards": list(simulation.guards) if simulation is not None else [],
+            "simulation_fees": list(simulation.fees) if simulation is not None else [],
+            "estimated_svm_network_fee_lamports": (
+                str(svm_fee) if svm_fee is not None else None
+            ),
+            "max_svm_network_fee_lamports": (
+                str(cfg.max_svm_network_fee_lamports) if cfg.max_svm_network_fee_lamports is not None else None
+            ),
             "balance_changes": (
                 [dataclasses.asdict(change) for change in simulation.balance_changes] if simulation is not None else []
             ),

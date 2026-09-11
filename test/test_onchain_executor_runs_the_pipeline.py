@@ -9,6 +9,7 @@ custom_info; and nothing it reports can be mistaken for a Gateway swap or an LP 
 """
 
 import asyncio
+import copy
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -109,6 +110,11 @@ class FakePipelineClient:
         self._maybe_raise("stage_evm")
         return Build.from_json(dict(self.staged), "evm")
 
+    async def stage_svm(self, *, instructions, app=None, skills=None):
+        self.calls.append(("stage_svm", {"instructions": instructions, "app": app, "skills": skills}))
+        self._maybe_raise("stage_svm")
+        return Build.from_json(dict(self.staged), "svm")
+
     async def build(self, chain, *, app=None, skills=None, operation=None, arguments=None, operations=None):
         self.calls.append(
             ("build", {"chain": chain, "app": app, "skills": skills, "operation": operation, "arguments": arguments})
@@ -175,6 +181,177 @@ def _transport():
 
 
 # ---------------------------------------------------------------------------- happy paths
+
+
+def _svm_fee_build():
+    return {
+        "status": "simulated", "digest": DIGEST,
+        "actions": [{"lane": "instruction", "instruction": {
+            "payer": "solana-wallet", "cluster": "mainnet-beta", "program_id": "program",
+            "accounts": [{"pubkey": "account", "is_signer": False, "is_writable": True}],
+            "data_base64": "AA==", "assembly": {"version": "v0"},
+        }}],
+        "simulation": {"status": "passed", "fees": [{
+            "account": "solana-wallet", "asset": "native", "amount": "5000",
+            "decimals": 9, "cluster": "mainnet-beta", "kind": "network",
+        }], "guards": [{"name": "svm_network_fees", "status": "passed"}]},
+    }
+
+
+def _svm_fee_config(limit=5000):
+    return OnchainExecutorConfig(
+        chain="svm", chain_id=1, mode="instructions", commit=True,
+        instructions=[{"instructions": [{"program_id": "program", "data_base64": "AA==", "accounts": []}]}],
+        max_svm_network_fee_lamports=limit,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit,reason", [(4999, "network_fee_over_budget"), (5000, None), (0, "network_fee_over_budget")])
+async def test_svm_fee_ceiling_is_enforced_before_commit_without_a_quote_price(limit, reason):
+    build = _svm_fee_build()
+    client = FakePipelineClient(staged=build)
+    executor = _executor(client, config=_svm_fee_config(limit))
+    await _run(executor)
+    info = executor.get_custom_info()
+    assert info["reason"] == reason
+    assert ("commit" in client.methods_called()) == (reason is None)
+    assert info["estimated_svm_network_fee_lamports"] == "5000"
+    assert info["estimated_gas_quote"] is None
+    assert info["simulation_fees"] == build["simulation"]["fees"]
+    assert executor.get_cum_fees_quote() == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", [
+    "missing_guard", "failed_guard", "duplicate_guard", "missing_fee", "wrong_cluster",
+    "wrong_payer", "action_cluster", "action_payer", "negative", "decimal", "nan",
+    "integer", "boolean", "wrong_decimals", "wrong_asset", "wrong_kind", "overflow",
+])
+async def test_incomplete_or_mismatched_svm_fee_evidence_never_commits(mutation):
+    build = _svm_fee_build()
+    sim = build["simulation"]
+    fee = sim["fees"][0]
+    if mutation == "missing_guard":
+        sim["guards"] = []
+    elif mutation == "failed_guard":
+        sim["guards"][0]["status"] = "failed"
+    elif mutation == "duplicate_guard":
+        sim["guards"] *= 2
+    elif mutation == "missing_fee":
+        sim["fees"] = []
+    elif mutation == "wrong_cluster":
+        fee["cluster"] = "devnet"
+    elif mutation == "wrong_payer":
+        fee["account"] = "other"
+    elif mutation == "action_cluster":
+        build["actions"][0]["instruction"]["cluster"] = "devnet"
+    elif mutation == "action_payer":
+        other = copy.deepcopy(build["actions"][0])
+        other["instruction"]["payer"] = "other"
+        build["actions"].append(other)
+    elif mutation == "wrong_decimals":
+        fee["decimals"] = 18
+    elif mutation == "wrong_asset":
+        fee["asset"] = "token"
+    elif mutation == "wrong_kind":
+        fee["kind"] = "protocol"
+    else:
+        fee["amount"] = {
+            "negative": "-1", "decimal": "0.5", "nan": "NaN", "integer": 5000,
+            "boolean": True, "overflow": str(2**64),
+        }[mutation]
+    client = FakePipelineClient(staged=build)
+    executor = _executor(client, config=_svm_fee_config())
+    await _run(executor)
+    assert executor.get_custom_info()["reason"] == "network_fee_unavailable"
+    assert "commit" not in client.methods_called()
+
+
+@pytest.mark.asyncio
+async def test_svm_fee_ceiling_counts_all_network_fees():
+    build = _svm_fee_build()
+    build["simulation"]["fees"] *= 2
+    client = FakePipelineClient(staged=build)
+    executor = _executor(client, config=_svm_fee_config(9999))
+    await _run(executor)
+    assert executor.get_custom_info()["estimated_svm_network_fee_lamports"] == "10000"
+    assert executor.get_custom_info()["reason"] == "network_fee_over_budget"
+    assert "commit" not in client.methods_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    ("payer", "other"), ("cluster", "devnet"), ("program_id", "different-program"),
+    ("data_base64", "AQ=="), ("accounts", []),
+    ("accounts", [{"pubkey": "account", "is_signer": True, "is_writable": True}]),
+    ("assembly", {"version": "v0", "priority_microlamports": 99999}),
+    ("assembly", {"version": "v0", "address_lookup_tables": ["another-table"]}),
+    ("new_execution_field", "unknown-extension"),
+])
+async def test_reviewed_plan_refuses_changed_authority_or_instruction_before_commit(field, value):
+    preview = _executor(FakePipelineClient(), config=_svm_fee_config())
+    preview._build = Build.from_json(_svm_fee_build(), "svm")
+    reviewed = preview.get_custom_info()["svm_plan_hash"]
+    assert reviewed is not None
+    changed = _svm_fee_build()
+    changed["actions"][0]["instruction"][field] = value
+    config = _svm_fee_config()
+    config.reviewed_svm_plan_hash = reviewed
+    client = FakePipelineClient(staged=changed)
+    executor = _executor(client, config=config)
+    await _run(executor)
+    assert executor.get_custom_info()["reason"] == "reviewed_plan_changed"
+    assert "commit" not in client.methods_called()
+
+
+@pytest.mark.asyncio
+async def test_reviewed_instruction_plan_survives_only_nonexecution_restaging_metadata():
+    original = _svm_fee_build()
+    original["actions"][0]["instruction"]["pending_ix_id"] = 1
+    preview = _executor(FakePipelineClient(), config=_svm_fee_config())
+    preview._build = Build.from_json(original, "svm")
+    config = _svm_fee_config()
+    config.reviewed_svm_plan_hash = preview.get_custom_info()["svm_plan_hash"]
+    restaged = copy.deepcopy(original)
+    restaged.update(digest="new-digest", expiresAt=123456)
+    restaged["actions"][0]["id"] = 30
+    restaged["actions"][0]["instruction"].update(pending_ix_id=30, current_lifecycle="queued", description="New label")
+    client = FakePipelineClient(staged=restaged)
+    executor = _executor(client, config=config)
+    await _run(executor)
+    assert executor.get_custom_info()["reason"] is None
+    assert "commit" in client.methods_called()
+
+
+def test_svm_evidence_reports_actual_network_even_when_config_label_differs():
+    config = _svm_fee_config()
+    config.cluster = "devnet"
+    executor = _executor(FakePipelineClient(), config=config)
+    executor._build = Build.from_json(_svm_fee_build(), "svm")
+    info = executor.get_custom_info()
+    assert info["cluster"] == "mainnet-beta"
+    assert info["requested_cluster"] == "devnet"
+    assert info["estimated_svm_network_fee_lamports"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("commit,simulation,methods,close_type", [
+    (True, SIMULATED, ["stage_svm", "simulate", "commit"], CloseType.COMPLETED),
+    (False, SIMULATED, ["stage_svm", "simulate"], CloseType.COMPLETED),
+    (True, REVERTED, ["stage_svm", "simulate"], CloseType.FAILED),
+])
+async def test_svm_instructions_use_shared_lifecycle_and_refuse_failed_simulation(commit, simulation, methods, close_type):
+    batches = [{"description": "deposit", "address_lookup_tables": ["lookup"],
+                "instructions": [{"program_id": "program", "accounts": [], "data_base64": "AA=="}]}]
+    client = FakePipelineClient(simulated=simulation)
+    executor = _executor(client, config=OnchainExecutorConfig(
+        chain="svm", chain_id=1, mode="instructions", instructions=batches, commit=commit,
+    ))
+    await _run(executor)
+    assert client.methods_called() == methods
+    assert client.calls[0][1]["instructions"] == batches
+    assert executor.close_type == close_type
 
 
 @pytest.mark.asyncio
@@ -705,3 +882,26 @@ async def test_lending_plan_checks_actual_calldata_before_commit(tamper):
     else:
         assert "commit" in client.methods_called()
         assert executor.close_type == CloseType.COMPLETED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit,complete,refused", [("2000000", True, False), ("1999999", True, True), ("2000000", False, True)])
+async def test_asset_budget_and_missing_evidence_refuse_before_wallet_handoff(limit, complete, refused):
+    build = _svm_fee_build()
+    build["simulation"]["balanceChanges"] = [
+        {"account": "solana-wallet", "asset": "USDC", "amount": "2000000", "direction": "out",
+         "cluster": "mainnet-beta", "step": 0},
+    ]
+    if complete:
+        build["simulation"]["guards"].append({"name": "svm_balance_changes", "status": "passed"})
+    config = _svm_fee_config()
+    from models.svm_policy import SvmSpendingPolicy
+    config.svm_spending_policy = SvmSpendingPolicy(
+        wallet="solana-wallet", market="account", protocol_program="program", allowed_programs=["program"],
+        max_debits_raw={"native": "10000", "USDC": limit},
+    )
+    client = FakePipelineClient(staged=build)
+    executor = _executor(client, config=config)
+    await _run(executor)
+    assert ("commit" not in client.methods_called()) == refused
+    assert executor.get_custom_info()["reason"] == ("spending_policy_refused" if refused else None)

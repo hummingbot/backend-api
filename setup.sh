@@ -738,6 +738,8 @@ AOMI_URL=https://chat.aomi.dev
 AOMI_TOKEN=
 # Optional operator-owned JSON policy; grants are enforced before durable execution admission.
 AOMI_LENDING_POLICY_FILE=
+# Registered solana-defi app ID for market preparation (uncomment after registration).
+# AOMI_PREPARATION_APPLICATION_ID=123
 
 # Paths
 BOTS_PATH=$(pwd)

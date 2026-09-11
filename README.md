@@ -370,6 +370,45 @@ Simulation estimates are exposed as `custom_info.estimated_gas_quote`, separatel
 price pool. Missing pricing stops a bounded request. This is an estimate, not a
 signer-enforced fee cap; it excludes rollup data fees and provider surcharges.
 
+### Solana market preparation
+
+Set `AOMI_PREPARATION_APPLICATION_ID` to the positive ID of the registered
+`solana-defi` Aomi application. The Aomi deployment must have that application's
+active release artifact and its preparation service configured. An app name
+alone does not select a verified release. Leaving the ID unset disables this
+preparation endpoint without disabling other executors.
+
+`POST /executors/onchain/prepare` accepts `operation` (`venues`, `market`,
+`position`, or `prepare`) and an `arguments` object. Hummingbot binds market,
+position and preparation requests to the connected Aomi Solana wallet; callers
+cannot choose another application's ID or a different RPC endpoint. The response
+contains unsigned instructions and market data, never a staged Build or a
+transaction submission.
+
+Submit the returned batches through the shared `onchain_executor` in SVM
+instruction mode to simulate them. Confirmation should retain the exact
+`reviewed_svm_plan_hash` from the preview and an explicit
+`max_svm_network_fee_lamports`. These bind the reviewed instructions and check
+complete simulated network fees; they do not constitute an unattended spending
+grant. Venue-specific SDK recipes run inside Aomi, so supporting these markets
+does not require separate Hummingbot venue connectors.
+
+`svm_spending_policy` adds a wallet, market account, protocol program, allowed
+top-level programs and a map of `max_debits_raw` keyed by mint (or `native` for
+SOL). Every observed outgoing wallet asset must be listed. Limits use unsigned
+raw integer strings, require a native limit, and do not subtract credits from
+other accounts or other balance rows. The selected market must occur in the
+selected protocol's staged instructions. A passing simulation with incomplete
+balance snapshots still refuses the policy before wallet handoff.
+
+These limits apply to final per-account net balance changes in one simulated
+transaction. They do not bound intermediate transfers, future execution state,
+approval authority or off-wallet economic exposure such as staked positions.
+Multi-transaction previews cannot certify a sequential budget and are refused
+when this policy is set. RPC fallback and unsupported token account layouts
+remain incomplete for this check. Use the exact reviewed plan hash when confirming;
+this policy is not an unattended grant or an on-chain spending restriction.
+
 ## Support
 
 - **Docs**: https://hummingbot.org/hummingbot-api/

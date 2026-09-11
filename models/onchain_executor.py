@@ -16,6 +16,8 @@ from aomi.pipeline.lending import LendingPlan
 from hummingbot.strategy_v2.executors.data_types import ExecutorConfigBase
 from pydantic import Field, model_validator
 
+from models.svm_policy import SvmSpendingPolicy
+
 # chain_id -> connector_name used for the executors table and the API listing.
 CHAIN_NAMES: Dict[int, str] = {
     1: "ethereum",
@@ -75,10 +77,15 @@ class OnchainExecutorConfig(ExecutorConfigBase):
         ..., ge=1, description="EVM chain id (1 ethereum, 10 optimism, 8453 base, 42161 arbitrum, ...); pass 1 for svm"
     )
     cluster: str = Field(default="mainnet-beta", description="svm only: Solana cluster the bundle targets")
-    mode: Literal["operation", "calls", "lending"] = Field(
+    mode: Literal["operation", "calls", "instructions", "lending"] = Field(
         ...,
         description="'operation' builds a catalog operation; 'calls' stages raw EVM calls; "
-                    "'lending' verifies an exact Aave V3 plan"
+                    "'instructions' stages Solana instruction batches; 'lending' verifies an exact Aave V3 plan"
+    )
+    instructions: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="instructions mode: svm_stage_ix argument batches, each containing a description and "
+                    "instructions list; accepts IDL encode or raw data_base64, accounts and lookup tables"
     )
     lending: Optional[LendingPlan] = Field(
         default=None, description="Exact Aave V3 supply or withdrawal plan, with amounts in raw token units"
@@ -110,6 +117,20 @@ class OnchainExecutorConfig(ExecutorConfigBase):
         gt=0,
         description="Gas ceiling in USDT; refuse to commit if simulated gas exceeds it or cannot be priced"
     )
+    max_svm_network_fee_lamports: Optional[int] = Field(
+        default=None, ge=0, strict=True,
+        description="Solana only: ceiling for the complete simulated network fee in lamports; "
+                    "missing fee evidence refuses submission. Excludes rent, protocol and signer charges."
+    )
+    reviewed_svm_plan_hash: Optional[str] = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$", strict=True,
+        description="Instructions mode: plan hash from the operator's preview. Refuse changed "
+                    "wallet, cluster, programs, accounts, instruction data or assembly options."
+    )
+    svm_spending_policy: Optional[SvmSpendingPolicy] = Field(
+        default=None,
+        description="Operator wallet, venue and simulated asset debit limits; requires complete balance evidence"
+    )
     keep_position: bool = Field(
         default=False,
         description="Reported back in custom_info for the caller; an on-chain bundle has no position to unwind"
@@ -127,7 +148,23 @@ class OnchainExecutorConfig(ExecutorConfigBase):
 
     @model_validator(mode="after")
     def _check_mode_and_derive(self):
-        if self.mode == "lending":
+        if self.svm_spending_policy is not None and (self.chain != "svm" or self.mode != "instructions"):
+            raise ValueError("svm_spending_policy requires svm instructions mode")
+        if self.max_svm_network_fee_lamports is not None and self.chain != "svm":
+            raise ValueError("max_svm_network_fee_lamports requires svm")
+        if self.reviewed_svm_plan_hash is not None and (self.chain != "svm" or self.mode != "instructions"):
+            raise ValueError("reviewed_svm_plan_hash requires svm instructions mode")
+        if self.mode == "instructions":
+            if self.chain != "svm" or not self.instructions:
+                raise ValueError("instructions mode requires non-empty instructions on svm")
+            if any(value is not None for value in (self.calls, self.operation, self.arguments, self.lending)):
+                raise ValueError("instructions mode takes only instruction batches")
+            for batch in self.instructions:
+                if not isinstance(batch.get("instructions"), list) or not batch["instructions"]:
+                    raise ValueError("each instruction batch requires a non-empty instructions list")
+        elif self.instructions is not None:
+            raise ValueError("instruction batches require instructions mode")
+        elif self.mode == "lending":
             if self.lending is None or self.chain != "evm" or self.chain_id != self.lending.chain_id:
                 raise ValueError("lending mode requires a plan on the configured EVM chain")
             if self.calls is not None or self.operation is not None or self.arguments is not None:

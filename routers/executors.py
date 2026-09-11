@@ -10,6 +10,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException
 from starlette import status
 
+from config import settings
 from deps import get_executor_service, get_market_data_service
 from models.executors import (
     CreateExecutorRequest,
@@ -25,6 +26,7 @@ from models.executors import (
     StopExecutorRequest,
     StopExecutorResponse,
 )
+from models.onchain_preparation import OnchainPreparationRequest
 from models.pagination import PaginatedResponse
 from services.executor_service import ExecutorService
 from services.market_data_service import MarketDataService
@@ -33,6 +35,22 @@ from utils.trading_pair import InvalidTradingPair, split_trading_pair
 logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Executors"], prefix="/executors")
+
+
+@router.post("/onchain/prepare")
+async def onchain_preparation(request: OnchainPreparationRequest):
+    """Read markets/positions or prepare unsigned instructions through the configured Aomi app."""
+    from services.onchain_executor import OnchainExecutor
+    from services.onchain_preparation import prepare_onchain
+
+    try:
+        async with OnchainExecutor._default_client() as client:
+            return await prepare_onchain(request, client, application_id=settings.aomi.preparation_application_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except Exception:
+        # Credential-bearing upstream URLs and bodies must not reach API clients.
+        raise HTTPException(status_code=502, detail="Aomi market preparation is unavailable")
 
 
 @router.post("/", response_model=CreateExecutorResponse, status_code=status.HTTP_201_CREATED)

@@ -22,6 +22,18 @@ def test_operation_mode_requires_an_operation():
         OnchainExecutorConfig(chain_id=8453, mode="operation")
 
 
+@pytest.mark.parametrize("value", [-1, 0.5, True, "5000"])
+def test_svm_fee_limit_requires_nonnegative_integer_lamports(value):
+    with pytest.raises(ValidationError):
+        OnchainExecutorConfig(chain="svm", chain_id=1, mode="operation", operation="deposit",
+                              max_svm_network_fee_lamports=value)
+
+
+def test_svm_fee_limit_cannot_be_applied_to_evm():
+    with pytest.raises(ValidationError, match="requires svm"):
+        OnchainExecutorConfig(chain_id=8453, mode="calls", calls=[A_CALL], max_svm_network_fee_lamports=5000)
+
+
 def test_calls_mode_requires_calls():
     with pytest.raises(ValidationError, match="non-empty 'calls'"):
         OnchainExecutorConfig(chain_id=8453, mode="calls")
@@ -132,7 +144,7 @@ def test_the_schema_endpoint_reads_the_config():
     assert fields["chain_id"]["required"] is True
     assert fields["chain_id"]["constraints"]["minimum"] == 1
     assert fields["mode"]["type"] == "enum"
-    assert set(fields["mode"]["enum_values"]) == {"operation", "calls", "lending"}
+    assert set(fields["mode"]["enum_values"]) == {"operation", "calls", "instructions", "lending"}
     assert fields["mode"]["required"] is True
     assert fields["commit"]["default"] is True
     assert fields["commit"]["required"] is False
@@ -181,3 +193,15 @@ def test_svm_records_derive_solana_fields():
     assert cfg.trading_pair == "SOL-SOL"
     devnet = OnchainExecutorConfig(chain="svm", chain_id=1, cluster="devnet", mode="operation", operation="jupiter_prepare_swap")
     assert devnet.connector_name == "solana-devnet"
+
+
+@pytest.mark.parametrize("overrides", [
+    {"chain": "evm"}, {"instructions": []}, {"instructions": [{"instructions": []}]},
+    {"calls": [A_CALL]}, {"operation": "swap"}, {"arguments": {}},
+    {"mode": "operation", "operation": "swap"},
+])
+def test_instruction_mode_rejects_ambiguous_or_empty_bundles(overrides):
+    values = dict(chain="svm", chain_id=1, mode="instructions",
+                  instructions=[{"description": "test", "instructions": [{"program_id": "p"}]}])
+    with pytest.raises(ValidationError):
+        OnchainExecutorConfig(**{**values, **overrides})
